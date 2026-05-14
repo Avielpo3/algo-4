@@ -1,0 +1,84 @@
+flowchart LR
+  %% Algo 4 Inbound API Gateway - Kafka Architecture
+
+  subgraph External["External Systems"]
+    MenuManagement["Menu Management"]
+    LaborManagement["Labor Management"]
+    KDS["KDS"]
+  end
+
+  subgraph Auth["External Auth Boundary"]
+    AuthService["Auth Service"]
+  end
+
+  subgraph Gateway["Algo 4 Inbound API Gateway"]
+    Intake["HTTP Request Intake<br/>Inbound POST Requests"]
+    Capture["Raw Request Capture"]
+    Validator["Request Validator"]
+    Adapter["Source Adapter"]
+    Producer["Kafka Producer"]
+  end
+
+  AuditStore[("Audit Store<br/>Raw Request + Status")]
+
+  subgraph Kafka["Kafka"]
+    BusinessTopics["Business Topics"]
+    RejectedTopic["Rejected Topic"]
+    RetryTopic["Retry Topic"]
+    DLQTopic["Dead Letter Topic"]
+  end
+
+  subgraph Consumers["Internal Services"]
+    Quote["Quote Service"]
+    Customer["Customer Service"]
+    Employee["Employee Service"]
+    PromiseTime["AI Promise Time"]
+    Orders["Order Management"]
+  end
+
+  MenuManagement -->|"POST HTTP request"| Intake
+  LaborManagement -->|"POST HTTP request"| Intake
+  KDS -->|"POST HTTP request"| Intake
+
+  Intake --> Capture
+  Capture -->|"store raw request<br/>RECEIVED"| AuditStore
+  Capture --> AuthService
+
+  AuthService -->|"authorized"| Validator
+  AuthService -->|"failed<br/>REJECTED"| AuditStore
+
+  Validator -->|"valid"| Adapter
+  Validator -->|"invalid<br/>REJECTED"| AuditStore
+  Validator -->|"invalid"| RejectedTopic
+
+  Adapter -->|"normalized"| Producer
+  Adapter -->|"failed<br/>NORMALIZATION_FAILED"| AuditStore
+  Adapter -->|"failed"| RejectedTopic
+
+  Producer -->|"published<br/>PUBLISHED"| BusinessTopics
+  Producer -->|"publish failed<br/>PUBLISH_FAILED"| AuditStore
+  Producer -->|"publish failed"| RetryTopic
+
+  RetryTopic -->|"retry"| Producer
+  RetryTopic -->|"exhausted<br/>DEAD_LETTERED"| AuditStore
+  RetryTopic -->|"exhausted"| DLQTopic
+
+  BusinessTopics --> Quote
+  BusinessTopics --> Customer
+  BusinessTopics --> Employee
+  BusinessTopics --> PromiseTime
+  BusinessTopics --> Orders
+
+  classDef external fill:#E3F2FD,stroke:#1565C0,stroke-width:1px,color:#0D47A1
+  classDef auth fill:#EDE7F6,stroke:#5E35B1,stroke-width:1px,color:#311B92
+  classDef gateway fill:#E8F5E9,stroke:#2E7D32,stroke-width:1px,color:#1B5E20
+  classDef audit fill:#FFF3E0,stroke:#EF6C00,stroke-width:1px,color:#E65100
+  classDef kafka fill:#F3E5F5,stroke:#6A1B9A,stroke-width:1px,color:#4A148C
+  classDef consumer fill:#ECEFF1,stroke:#455A64,stroke-width:1px,color:#263238
+
+  class MenuManagement,LaborManagement,KDS external
+  class AuthService auth
+  class Intake,Capture,Validator,Adapter,Producer gateway
+  class AuditStore audit
+  class BusinessTopics,RejectedTopic,RetryTopic,DLQTopic kafka
+  class Quote,Customer,Employee,PromiseTime,Orders consumer
