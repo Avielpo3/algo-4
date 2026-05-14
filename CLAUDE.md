@@ -234,6 +234,8 @@ The Gateway should publish business events. It should not directly call every do
 
 Order Management is the exception for POS order-management request flows that need an immediate POS-compatible response. For those requests, the Gateway should synchronously call Order Management, map the result into the POS response body, and still publish relevant business events to Kafka when appropriate.
 
+The Gateway should not subscribe to Kafka and hold the POS HTTP connection open while waiting for an event response from another service. Kafka remains the asynchronous fan-out mechanism after the synchronous POS response path.
+
 Downstream services subscribe to the topics they care about:
 
 - Quote Service.

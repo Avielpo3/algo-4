@@ -195,6 +195,8 @@ If a JSON endpoint is called without the required `Content-Type: application/jso
 
 Order Management is a synchronous exception to the general event-publishing flow. For order-management requests that need a POS response, the Gateway should call Order Management synchronously, map the processing result into the POS response body, and publish Kafka business events when appropriate.
 
+Do not implement POS request/response by having the Gateway subscribe to Kafka and hold the POS HTTP connection open while waiting for an event response from another service. Kafka should remain the asynchronous fan-out mechanism after the synchronous POS response path.
+
 ## Task 1: Scaffold Go Module
 
 **Files:**

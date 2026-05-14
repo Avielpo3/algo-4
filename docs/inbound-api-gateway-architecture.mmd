@@ -1,85 +1,76 @@
-flowchart LR
+flowchart TB
   %% Algo 4 Inbound API Gateway - Kafka Architecture
 
-  subgraph External["External Systems"]
-    MenuManagement["Menu Management"]
-    LaborManagement["Labor Management"]
-    KDS["KDS"]
-  end
+  %% --- Sources ---
+  POS["Sources<br/>Menu Management · Labor Management · KDS"]:::ext
 
-  subgraph Auth["External Auth Boundary"]
-    AuthService["Auth Service"]
-  end
-
-  subgraph Gateway["Algo 4 Inbound API Gateway"]
-    Intake["HTTP Request Intake<br/>Inbound POST Requests"]
-    Capture["Raw Request Capture"]
-    AuthDecision["Auth Decision<br/>Authorized / Rejected"]
-    Validator["Request Validator"]
+  %% --- Gateway pipeline ---
+  subgraph GW["Algo 4 Inbound API Gateway"]
+    direction TB
+    Intake["HTTP Intake<br/>(POST request, header check)"]
+    Capture["Raw Capture"]
+    AuthGate{"Authenticated?"}
+    Validate{"Valid request?"}
     Adapter["Source Adapter"]
-    ResponseBuilder["POS Response Builder"]
+    Branch{"Sync POS<br/>response needed?"}
     Producer["Kafka Producer"]
+    RespBuilder["POS Response Builder"]
+
+    Intake --> Capture
+    Capture --> AuthGate
+    AuthGate -->|"yes"| Validate
+    Validate -->|"yes"| Adapter
+    Adapter --> Branch
+    Branch -->|"no · async"| Producer
   end
 
-  subgraph Audit["Audit Service"]
-    AuditService["Raw Request + Status"]
-  end
+  %% --- Sources <-> Gateway HTTP edges ---
+  POS -->|"POST HTTP request"| Intake
+  Intake -->|"415 bad header"| RespBuilder
+  AuthGate -->|"no"| RespBuilder
+  Validate -->|"no"| RespBuilder
+  Adapter -.->|"normalization failed"| RespBuilder
+  RespBuilder -->|"200 OK · POS body<br/>or 415"| POS
 
+  %% --- External dependencies ---
+  AuthSvc["Auth Service"]:::ext
+  OrderSync["Order Management<br/>Sync API"]:::ext
+
+  AuthGate <-->|"check"| AuthSvc
+  Branch -->|"yes · sync"| OrderSync
+  OrderSync -->|"result"| RespBuilder
+
+  %% --- Audit (single store, dotted arrows) ---
+  Audit[("Audit Service<br/>Raw Request + Status")]:::audit
+
+  Capture -.->|"RECEIVED"| Audit
+  RespBuilder -.->|"REJECTED / FAILED"| Audit
+  Producer -.->|"PUBLISHED / PUBLISH_FAILED"| Audit
+
+  %% --- Kafka publish path + reliability ---
   subgraph Kafka["Kafka"]
-    BusinessTopics["Business Topics"]
-    RetryTopic["Retry Topic"]
-    DLQTopic["Dead Letter Topic"]
+    direction LR
+    Topics[("Business Topics")]
+    Retry[("Retry Topic")]
+    DLQ[("Dead Letter Topic")]
+
+    Retry -->|"exhausted"| DLQ
   end
 
-  subgraph Consumers["Internal Services"]
-    Quote["Quote Service"]
-    Customer["Customer Service"]
-    Employee["Employee Service"]
-    PromiseTime["AI Promise Time"]
-    Orders["Order Management"]
-  end
+  Producer -->|"publish"| Topics
+  Producer -->|"publish failed"| Retry
+  Retry -->|"retry"| Producer
 
-  MenuManagement -->|"POST HTTP request"| Intake
-  LaborManagement -->|"POST HTTP request"| Intake
-  KDS -->|"POST HTTP request"| Intake
+  %% --- Async consumers ---
+  Consumers["Internal Services<br/>Quote · Customer · Employee · Order Mgmt · Promise Time"]:::svc
+  Topics --> Consumers
 
-  Intake --> Capture
-  Capture -->|"gateway writes<br/>RECEIVED"| AuditService
-  Capture --> AuthService
-
-  AuthService -->|"auth / reject result"| AuthDecision
-  AuthDecision -->|"authorized"| Validator
-  AuthDecision -->|"rejected<br/>gateway writes REJECTED"| AuditService
-
-  Validator -->|"valid"| Adapter
-  Validator -->|"invalid<br/>gateway writes REJECTED"| AuditService
-
-  Adapter -->|"normalized"| Producer
-  Adapter -->|"failed<br/>gateway writes NORMALIZATION_FAILED"| AuditService
-
-  Producer -->|"published<br/>PUBLISHED"| BusinessTopics
-  Producer -->|"publish failed<br/>gateway writes PUBLISH_FAILED"| AuditService
-  Producer -->|"publish failed"| RetryTopic
-
-  RetryTopic -->|"retry"| Producer
-  RetryTopic -->|"exhausted"| DLQTopic
-
-  BusinessTopics --> Quote
-  BusinessTopics --> Customer
-  BusinessTopics --> Employee
-  BusinessTopics --> PromiseTime
-  BusinessTopics --> Orders
-
-  classDef external fill:#E3F2FD,stroke:#1565C0,stroke-width:1px,color:#0D47A1
-  classDef auth fill:#EDE7F6,stroke:#5E35B1,stroke-width:1px,color:#311B92
-  classDef gateway fill:#E8F5E9,stroke:#2E7D32,stroke-width:1px,color:#1B5E20
+  %% --- Styles ---
+  classDef ext fill:#E3F2FD,stroke:#1565C0,stroke-width:1px,color:#0D47A1
+  classDef gw fill:#E8F5E9,stroke:#2E7D32,stroke-width:1px,color:#1B5E20
   classDef audit fill:#FFF3E0,stroke:#EF6C00,stroke-width:1px,color:#E65100
   classDef kafka fill:#F3E5F5,stroke:#6A1B9A,stroke-width:1px,color:#4A148C
-  classDef consumer fill:#ECEFF1,stroke:#455A64,stroke-width:1px,color:#263238
+  classDef svc fill:#ECEFF1,stroke:#455A64,stroke-width:1px,color:#263238
 
-  class MenuManagement,LaborManagement,KDS external
-  class AuthService auth
-  class Intake,Capture,AuthDecision,Validator,Adapter,Producer gateway
-  class AuditService audit
-  class BusinessTopics,RetryTopic,DLQTopic kafka
-  class Quote,Customer,Employee,PromiseTime,Orders consumer
+  class Intake,Capture,AuthGate,Validate,Adapter,Branch,Producer,RespBuilder gw
+  class Topics,Retry,DLQ kafka
