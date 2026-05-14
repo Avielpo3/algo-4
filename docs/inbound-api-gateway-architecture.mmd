@@ -14,16 +14,19 @@ flowchart LR
   subgraph Gateway["Algo 4 Inbound API Gateway"]
     Intake["HTTP Request Intake<br/>Inbound POST Requests"]
     Capture["Raw Request Capture"]
+    AuthDecision["Auth Decision<br/>Authorized / Rejected"]
     Validator["Request Validator"]
     Adapter["Source Adapter"]
+    ResponseBuilder["POS Response Builder"]
     Producer["Kafka Producer"]
   end
 
-  AuditStore[("Audit Store<br/>Raw Request + Status")]
+  subgraph Audit["Audit Service"]
+    AuditService["Raw Request + Status"]
+  end
 
   subgraph Kafka["Kafka"]
     BusinessTopics["Business Topics"]
-    RejectedTopic["Rejected Topic"]
     RetryTopic["Retry Topic"]
     DLQTopic["Dead Letter Topic"]
   end
@@ -41,26 +44,24 @@ flowchart LR
   KDS -->|"POST HTTP request"| Intake
 
   Intake --> Capture
-  Capture -->|"store raw request<br/>RECEIVED"| AuditStore
+  Capture -->|"gateway writes<br/>RECEIVED"| AuditService
   Capture --> AuthService
 
-  AuthService -->|"authorized"| Validator
-  AuthService -->|"failed<br/>REJECTED"| AuditStore
+  AuthService -->|"auth / reject result"| AuthDecision
+  AuthDecision -->|"authorized"| Validator
+  AuthDecision -->|"rejected<br/>gateway writes REJECTED"| AuditService
 
   Validator -->|"valid"| Adapter
-  Validator -->|"invalid<br/>REJECTED"| AuditStore
-  Validator -->|"invalid"| RejectedTopic
+  Validator -->|"invalid<br/>gateway writes REJECTED"| AuditService
 
   Adapter -->|"normalized"| Producer
-  Adapter -->|"failed<br/>NORMALIZATION_FAILED"| AuditStore
-  Adapter -->|"failed"| RejectedTopic
+  Adapter -->|"failed<br/>gateway writes NORMALIZATION_FAILED"| AuditService
 
   Producer -->|"published<br/>PUBLISHED"| BusinessTopics
-  Producer -->|"publish failed<br/>PUBLISH_FAILED"| AuditStore
+  Producer -->|"publish failed<br/>gateway writes PUBLISH_FAILED"| AuditService
   Producer -->|"publish failed"| RetryTopic
 
   RetryTopic -->|"retry"| Producer
-  RetryTopic -->|"exhausted<br/>DEAD_LETTERED"| AuditStore
   RetryTopic -->|"exhausted"| DLQTopic
 
   BusinessTopics --> Quote
@@ -78,7 +79,7 @@ flowchart LR
 
   class MenuManagement,LaborManagement,KDS external
   class AuthService auth
-  class Intake,Capture,Validator,Adapter,Producer gateway
-  class AuditStore audit
-  class BusinessTopics,RejectedTopic,RetryTopic,DLQTopic kafka
+  class Intake,Capture,AuthDecision,Validator,Adapter,Producer gateway
+  class AuditService audit
+  class BusinessTopics,RetryTopic,DLQTopic kafka
   class Quote,Customer,Employee,PromiseTime,Orders consumer

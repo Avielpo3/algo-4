@@ -17,6 +17,7 @@
 - Keep source-specific logic inside adapters.
 - Persist raw payloads before validation so invalid requests are still auditable.
 - Use a canonical event envelope with a variable `data` payload.
+- Preserve the legacy POS immediate response contract for order-management flows that require a synchronous response.
 - Treat the Auth Service contract, raw storage technology, and EventBus technology as replaceable interfaces until final platform decisions are made.
 - Use TDD for each component.
 
@@ -24,7 +25,7 @@
 
 ```mermaid
 flowchart LR
-  %% Algo 4 Inbound API Gateway - Executive Architecture
+  %% Algo 4 Inbound API Gateway - Kafka Architecture
 
   subgraph External["External Systems"]
     MenuManagement["Menu Management"]
@@ -32,28 +33,31 @@ flowchart LR
     KDS["KDS"]
   end
 
+  subgraph Auth["External Auth Boundary"]
+    AuthService["Auth Service"]
+  end
+
   subgraph Gateway["Algo 4 Inbound API Gateway"]
-    EventIntake["Event Intake API<br/>Inbound POST Events"]
-    AuthService["Auth Service<br/>Source Identity + Trust"]
-    Capture["Request Capture<br/>Metadata + Correlation ID"]
+    Intake["HTTP Request Intake<br/>Inbound POST Requests"]
+    Capture["Raw Request Capture"]
+    AuthDecision["Auth Decision<br/>Authorized / Rejected"]
     Validator["Request Validator"]
     Adapter["Source Adapter"]
-    Envelope["Canonical Algo Event<br/>JSON Envelope"]
+    ResponseBuilder["POS Response Builder"]
+    Producer["Kafka Producer"]
   end
 
-  subgraph Audit["Audit And Reliability"]
-    RawStore[("Immutable Raw Request Store")]
-    Rejected["Rejected Event Topic"]
-    FailedNormalization["Failed Normalization Topic"]
-    Retry["Retry Queue"]
-    DLQ["Dead Letter Queue"]
+  subgraph Audit["Audit Service"]
+    AuditService["Raw Request + Status"]
   end
 
-  subgraph Messaging["Internal EventBus"]
-    EventBus[("Business Event Topics")]
+  subgraph Kafka["Kafka"]
+    BusinessTopics["Business Topics"]
+    RetryTopic["Retry Topic"]
+    DLQTopic["Dead Letter Topic"]
   end
 
-  subgraph Consumers["Subscribed Internal Services"]
+  subgraph Consumers["Internal Services"]
     Quote["Quote Service"]
     Customer["Customer Service"]
     Employee["Employee Service"]
@@ -61,39 +65,61 @@ flowchart LR
     Orders["Order Management"]
   end
 
-  MenuManagement -->|"POST event"| EventIntake
-  LaborManagement -->|"POST event"| EventIntake
-  KDS -->|"POST event"| EventIntake
+  MenuManagement -->|"POST HTTP request"| Intake
+  LaborManagement -->|"POST HTTP request"| Intake
+  KDS -->|"POST HTTP request"| Intake
 
-  EventIntake --> AuthService
-  AuthService --> Capture
-  Capture --> RawStore
-  Capture --> Validator
+  Intake --> Capture
+  Capture -->|"gateway writes<br/>RECEIVED"| AuditService
+  Capture --> AuthService
+
+  AuthService -->|"auth / reject result"| AuthDecision
+  AuthDecision -->|"authorized"| Validator
+  AuthDecision -->|"rejected<br/>gateway writes REJECTED"| AuditService
+  AuthDecision -->|"rejected"| ResponseBuilder
+
   Validator -->|"valid"| Adapter
-  Validator -->|"invalid"| Rejected
-  Adapter -->|"normalized"| Envelope
-  Adapter -->|"normalization failed"| FailedNormalization
-  Envelope -->|"publish"| EventBus
-  Envelope -->|"publish failed"| Retry
-  Retry -->|"retry publish"| EventBus
-  Retry -->|"retries exhausted"| DLQ
+  Validator -->|"invalid<br/>gateway writes REJECTED"| AuditService
+  Validator -->|"invalid"| ResponseBuilder
 
-  EventBus --> Quote
-  EventBus --> Customer
-  EventBus --> Employee
-  EventBus --> PromiseTime
-  EventBus --> Orders
+  Adapter -->|"normalized"| Producer
+  Adapter -->|"order-management request<br/>sync response needed"| Orders
+  Orders -->|"processing result"| ResponseBuilder
+  Adapter -->|"failed<br/>gateway writes NORMALIZATION_FAILED"| AuditService
+  Adapter -->|"failed"| ResponseBuilder
+
+  Producer -->|"published<br/>PUBLISHED"| BusinessTopics
+  Producer -->|"publish failed<br/>gateway writes PUBLISH_FAILED"| AuditService
+  Producer -->|"publish failed"| RetryTopic
+
+  RetryTopic -->|"retry"| Producer
+  RetryTopic -->|"exhausted"| DLQTopic
+
+  ResponseBuilder -->|"200 OK<br/>POS response body"| MenuManagement
+  ResponseBuilder -->|"200 OK<br/>POS response body"| LaborManagement
+  ResponseBuilder -->|"200 OK<br/>POS response body"| KDS
+  Intake -->|"415 Unsupported Media Type<br/>missing or invalid Content-Type"| MenuManagement
+  Intake -->|"415 Unsupported Media Type<br/>missing or invalid Content-Type"| LaborManagement
+  Intake -->|"415 Unsupported Media Type<br/>missing or invalid Content-Type"| KDS
+
+  BusinessTopics --> Quote
+  BusinessTopics --> Customer
+  BusinessTopics --> Employee
+  BusinessTopics --> PromiseTime
+  BusinessTopics --> Orders
 
   classDef external fill:#E3F2FD,stroke:#1565C0,stroke-width:1px,color:#0D47A1
+  classDef auth fill:#EDE7F6,stroke:#5E35B1,stroke-width:1px,color:#311B92
   classDef gateway fill:#E8F5E9,stroke:#2E7D32,stroke-width:1px,color:#1B5E20
   classDef audit fill:#FFF3E0,stroke:#EF6C00,stroke-width:1px,color:#E65100
-  classDef bus fill:#F3E5F5,stroke:#6A1B9A,stroke-width:1px,color:#4A148C
+  classDef kafka fill:#F3E5F5,stroke:#6A1B9A,stroke-width:1px,color:#4A148C
   classDef consumer fill:#ECEFF1,stroke:#455A64,stroke-width:1px,color:#263238
 
   class MenuManagement,LaborManagement,KDS external
-  class EventIntake,AuthService,Capture,Validator,Adapter,Envelope gateway
-  class RawStore,Rejected,FailedNormalization,Retry,DLQ audit
-  class EventBus bus
+  class AuthService auth
+  class Intake,Capture,AuthDecision,Validator,Adapter,ResponseBuilder,Producer gateway
+  class AuditService audit
+  class BusinessTopics,RetryTopic,DLQTopic kafka
   class Quote,Customer,Employee,PromiseTime,Orders consumer
 ```
 
@@ -144,6 +170,30 @@ Use this as the first implementation target:
   "data": {}
 }
 ```
+
+## POS-Compatible HTTP Response Contract
+
+Algo 3 POS integrations commonly return `200 OK` for accepted POST requests and put the business outcome in the response body. Algo 4 should preserve this behavior for POS order-management flows that need an immediate response.
+
+Accepted POS requests should return `200 OK` with a POS response body:
+
+```json
+{
+  "time": "YYYYMMDD HHMMSS",
+  "status": "ok",
+  "rowCount": 1,
+  "errDescription": "",
+  "validationErrors": null,
+  "warnings": [],
+  "orders": []
+}
+```
+
+For business or processing failures that are accepted at the HTTP layer, still return `200 OK` and set `status` to a failure value such as `validationError`, `parseError`, `readError`, `dbError`, `internalError`, or `unexpectedError`. Include `errDescription` and `validationErrors` when available.
+
+If a JSON endpoint is called without the required `Content-Type: application/json` header, return `415 Unsupported Media Type` with a POS response body using `status: "Failure"` and an `errDescription` such as `Missing body Content-Type:application/json`.
+
+Order Management is a synchronous exception to the general event-publishing flow. For order-management requests that need a POS response, the Gateway should call Order Management synchronously, map the processing result into the POS response body, and publish Kafka business events when appropriate.
 
 ## Task 1: Scaffold Go Module
 
@@ -450,8 +500,10 @@ Cover:
 
 - Valid POST stores raw request.
 - Valid POST validates, normalizes, and publishes event.
-- Handler returns `200` or `202`.
-- Invalid request stores raw request and returns acknowledgement.
+- POS order-management request returns `200 OK` with POS response body.
+- Accepted business or validation failure returns `200 OK` with failure `status` in POS response body.
+- Missing or invalid JSON `Content-Type` returns `415 Unsupported Media Type`.
+- Invalid request stores raw request and returns a POS-compatible response.
 - Invalid request does not expose internal validation details.
 - Publish failure records failure and still returns controlled response.
 
@@ -463,7 +515,9 @@ Handler should depend on interfaces:
 - Raw store.
 - Validator.
 - Adapter registry.
+- Order Management client.
 - Publisher.
+- POS response builder.
 - Logger.
 
 **Step 3: Implement request flow**
@@ -476,8 +530,9 @@ Order:
 4. Store raw body and metadata.
 5. Validate request.
 6. Normalize through adapter.
-7. Publish canonical event.
-8. Return acknowledgement.
+7. For order-management requests, call Order Management synchronously and build the POS response body.
+8. Publish canonical event when appropriate.
+9. Return `200 OK` with POS response body, or `415 Unsupported Media Type` for missing or invalid JSON `Content-Type`.
 
 **Step 4: Wire main**
 
@@ -677,9 +732,9 @@ curl -i -X POST http://localhost:8080/inbound/events \
 
 Expected:
 
-- HTTP response is `200` or `202`.
+- HTTP response is `200 OK` with a POS response body.
 - Raw payload is stored exactly as sent.
-- Canonical event is published through the configured publisher.
+- Canonical event is published through the configured publisher when appropriate.
 - Logs contain `eventId` and `correlationId`.
 
 ## Open Decisions Before Production
