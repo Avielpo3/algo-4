@@ -1,0 +1,29 @@
+flowchart LR
+  %% Algo 4 Outbound (Cloud) API Gateway
+
+  Bus[("Internal EventBus")]:::bus
+  CGW["Outbound (Cloud) Gateway"]:::gw
+
+  DaaS["DaaS Gateway<br/>(other cluster)"]:::ext
+  Proxy["Proxy Service"]:::ext
+  Mobile["Mobile Devices"]:::device
+  Admin["Admin Panel UI"]:::ext
+
+  %% Internal cluster <-> Cloud GW
+  Bus <--> CGW
+
+  %% Cloud GW <-> DaaS (other cluster)
+  CGW -->|"HTTP POST"| DaaS
+  DaaS -->|"Kafka"| CGW
+
+  %% Cloud GW <-> Proxy <-> Mobile
+  CGW <-->|"Kafka"| Proxy
+  Proxy <-->|"WebSocket"| Mobile
+
+  %% Cloud GW <-> Admin Panel UI
+  Admin <-->|"HTTPS REST"| CGW
+
+  classDef gw fill:#FFFDE7,stroke:#F9A825,stroke-width:1px,color:#F57F17
+  classDef bus fill:#F3E5F5,stroke:#6A1B9A,stroke-width:1px,color:#4A148C
+  classDef ext fill:#E3F2FD,stroke:#1565C0,stroke-width:1px,color:#0D47A1
+  classDef device fill:#E8F5E9,stroke:#2E7D32,stroke-width:1px,color:#1B5E20
