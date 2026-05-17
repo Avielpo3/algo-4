@@ -1,6 +1,7 @@
 flowchart LR
-  %% Algo 4 Outbound (Cloud) API Gateway
+  %% Algo 4 Outbound (Cloud) Gateway
 
+  Services["Algo 4 Services<br/>(black box)"]:::svc
   Bus[("Internal EventBus")]:::bus
   CGW["Outbound (Cloud) Gateway"]:::gw
 
@@ -9,12 +10,13 @@ flowchart LR
   Mobile["Mobile Devices"]:::device
   Admin["Admin Panel UI"]:::ext
 
-  %% Internal cluster <-> Cloud GW
-  Bus <--> CGW
+  %% Algo 4 services -> EventBus -> Cloud GW
+  Services -->|"publish"| Bus
+  Bus -->|"GetQuoteEvent<br/>CreateQuoteEvent<br/>UpdateQuoteEvent<br/>DeleteQuoteEvent"| CGW
 
   %% Cloud GW <-> DaaS (other cluster)
   CGW -->|"HTTP POST"| DaaS
-  DaaS -->|"Kafka"| CGW
+  DaaS -->|"Kafka<br/>provider callbacks"| CGW
 
   %% Cloud GW <-> Proxy <-> Mobile
   CGW <-->|"Kafka"| Proxy
@@ -23,7 +25,8 @@ flowchart LR
   %% Cloud GW <-> Admin Panel UI
   Admin <-->|"HTTPS REST"| CGW
 
-  classDef gw fill:#FFFDE7,stroke:#F9A825,stroke-width:1px,color:#F57F17
+  classDef svc fill:#ECEFF1,stroke:#455A64,stroke-width:1px,color:#263238
   classDef bus fill:#F3E5F5,stroke:#6A1B9A,stroke-width:1px,color:#4A148C
+  classDef gw fill:#FFFDE7,stroke:#F9A825,stroke-width:1px,color:#F57F17
   classDef ext fill:#E3F2FD,stroke:#1565C0,stroke-width:1px,color:#0D47A1
   classDef device fill:#E8F5E9,stroke:#2E7D32,stroke-width:1px,color:#1B5E20
