@@ -2,7 +2,8 @@ flowchart TB
   %% Algo 4 Inbound API Gateway - Kafka Architecture
 
   %% --- Sources ---
-  POS["Sources<br/>Menu Management · Labor Management · KDS"]:::ext
+  POS["Brand POS"]:::ext
+  OtherSources["Other Sources<br/>KDS · Labor Management · VIP · Cabinet · Vision · GPS"]:::ext
 
   %% --- Gateway pipeline ---
   subgraph GW["Algo 4 Inbound API Gateway"]
@@ -12,7 +13,7 @@ flowchart TB
     AuthGate{"Authenticated?"}
     Validate{"Valid request?"}
     Adapter["Source Adapter"]
-    Branch{"Sync POS<br/>response needed?"}
+    Branch{"POS sync<br/>response needed?"}
     Producer["Kafka Producer"]
     RespBuilder["POS Response Builder"]
 
@@ -26,19 +27,24 @@ flowchart TB
 
   %% --- Sources <-> Gateway HTTP edges ---
   POS -->|"POST HTTP request"| Intake
+  OtherSources -->|"POST HTTP request"| Intake
   Intake -->|"415 bad header"| RespBuilder
   AuthGate -->|"no"| RespBuilder
   Validate -->|"no"| RespBuilder
   Adapter -.->|"normalization failed"| RespBuilder
-  RespBuilder -->|"200 OK · POS body<br/>or 415"| POS
+  RespBuilder -->|"200 OK · POS body<br/>incl. promise time"| POS
+  RespBuilder -->|"200 OK / v2 JSON / 415"| OtherSources
 
-  %% --- External dependencies ---
+  %% --- External dependencies (sync) ---
   AuthSvc["Auth Service"]:::ext
   OrderSync["Order Management<br/>Sync API"]:::ext
+  PromiseTime["AI Promise Time<br/>Sync HTTP API"]:::ext
 
   AuthGate <-->|"check"| AuthSvc
   Branch -->|"yes · sync"| OrderSync
-  OrderSync -->|"result"| RespBuilder
+  Branch -->|"yes · sync"| PromiseTime
+  OrderSync -->|"order result"| RespBuilder
+  PromiseTime -->|"promise time"| RespBuilder
 
   %% --- Audit (single store, dotted arrows) ---
   Audit[("Audit Service<br/>Raw Request + Status")]:::audit

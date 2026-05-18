@@ -2,15 +2,17 @@
 
 <!--
 Business-side service definition. Filled from a sweep of the legacy Algo 3
-codebase (bitbucket.org/dragontailcom/algo) and the KFC Menu Service
-(bitbucket.org/dragontailcom/kfcmenuservice).
+codebase (bitbucket.org/dragontailcom/algo).
 
 SCOPE OF "EVENTS" IN THIS DOC:
 Only events that cross the External Systems -> Algo boundary. Concretely:
 the sender is a system that is NOT part of the Algo cluster - brand POS,
-vendor KDS, brand Menu Management, brand Labor Management, brand
-loyalty/VIP, third-party cabinet hardware, third-party vision cameras,
-in-store GPS trackers, cloud order publishers.
+vendor KDS, brand Labor Management, brand loyalty/VIP, third-party
+cabinet hardware, third-party vision cameras, in-store GPS trackers,
+cloud order publishers.
+
+Menu Management is intentionally out of scope for now and will be picked
+up in a follow-up iteration of this doc.
 
 Calls from Algo's own components into Algo's own backend (legacy makeline
 FE, Process Center station UI, line-management UI, dispatch UI, support
@@ -27,7 +29,9 @@ section 4 for traceability.
 
 ## 1. Purpose
 
-The Inbound API Gateway is the single entry point through which **external systems** push events into the Algo 4 cluster. It receives traffic from store-side brand POS clients, vendor KDS devices, brand Menu Management (today: `kfcmenuservice`), brand Labor Management feeds, brand VIP / loyalty integrations, cloud order publishers, third-party holding-cabinet hardware, third-party vision / camera services, and in-store GPS trackers. The gateway authenticates each call, persists the raw payload for audit, validates the request, normalizes the source-specific shape into a canonical Algo event, and publishes that event onto the internal Kafka EventBus. For POS-style flows it preserves the legacy `200 OK + POS response body` contract so existing brand POS clients keep working unchanged during the Algo 3 → Algo 4 migration.
+The Inbound API Gateway is the single entry point through which **external systems** push events into the Algo 4 cluster. It receives traffic from store-side brand POS clients, vendor KDS devices, brand Labor Management feeds, brand VIP / loyalty integrations, cloud order publishers, third-party holding-cabinet hardware, third-party vision / camera services, and in-store GPS trackers. The gateway authenticates each call, persists the raw payload for audit, validates the request, normalizes the source-specific shape into a canonical Algo event, and publishes that event onto the internal Kafka EventBus. For POS-style flows it preserves the legacy `200 OK + POS response body` contract so existing brand POS clients keep working unchanged during the Algo 3 → Algo 4 migration, and on POS order-entry the gateway also synchronously calls AI Promise Time so the promised pickup / delivery time can be folded into the same POS response body.
+
+Menu Management is intentionally **out of scope for now** and is omitted from this iteration of the doc.
 
 ## 2. Scope
 
@@ -43,12 +47,14 @@ The Inbound API Gateway is the single entry point through which **external syste
 - Honor the POS-compatible HTTP response contract (`200 OK` with `time` / `status` / `rowCount` / `errDescription` / `validationErrors` / `warnings` / `orders`, plus `415` on missing `application/json`).
 - Track each inbound message through the `RECEIVED → RAW_STORED → VALIDATED → NORMALIZED → PUBLISHED` lifecycle, and route `REJECTED` / `PUBLISH_FAILED` cases to the audit store and retry / DLQ topics.
 - Synchronously call Order Management for POS order-management flows that need an immediate POS-compatible response body, and fold its result into that response.
+- Synchronously call AI Promise Time on the POS order-entry path and fold the promised pickup / delivery time into the same POS response body. KDS / cabinet / camera / GPS callers do **not** get a promise time in their response.
 - Enforce per-source idempotency before publishing (`Idempotency-Key` header, `sourceEventId`, or `sourceSystem + storeId + eventType + sourceEventId` tuple).
 
 ### Out of Scope
 
+- **Menu Management.** All menu-publish, item-property, and combo-publish events are deferred to a later iteration of this doc. The `kfcmenuservice` webhook chain, `POST /PosInsertItemProperties`, and `POST /combos` are not covered here.
 - Any HTTP route that Algo's own components call into Algo's own backend (makeline FE, Process Center station UI, line-management UI, dispatch UI, support tooling). Those are *internal* traffic and become in-cluster RPC or direct event subscription in Algo 4 — not gateway events.
-- Implementing the business logic of any downstream consumer (Quote, Customer, Employee, Order Management, AI Promise Time, Menu Service, Cabinet UI, etc.).
+- Implementing the business logic of any downstream consumer (Quote, Customer, Employee, Order Management, AI Promise Time, Cabinet UI, etc.).
 - Talking to mobile devices, DaaS Gateway, or the Admin Panel UI — those are the Outbound (Cloud) Gateway's surfaces.
 - Async aggregator callbacks (DoorDash / Uber / Wolt / etc.). Those arrive over the Outbound (Cloud) Gateway's DaaS Kafka consumer in Algo 4 and are republished onto the same internal topics — they do **not** enter through this gateway.
 - The GPS / Traffilog telematics pull loop (`IgnitionEvent.go`). Algo today *polls* an external GPS server; nothing is pushed in. If that becomes a push channel later it can be added here.
@@ -67,7 +73,7 @@ The gateway is the front door for orders entering the store from outside. Today 
 - Brand VIP / loyalty integrations hitting `POST /api/order/vip` and the related VIP routes.
 - Payment events arriving from the POS / payment terminal on `POST /updateOrderPayment`.
 
-For each of these the gateway captures the raw payload, validates it, emits a single canonical inbound event onto the bus (`algo.pos.order.received.v1` and friends), and — for the POS-sync variants — synchronously asks Order Management to commit the order so it can build the POS-compatible response body before returning to the caller.
+For each of these the gateway captures the raw payload, validates it, emits a single canonical inbound event onto the bus (`algo.pos.order.received.v1` and friends), and — for the POS-sync variants — synchronously asks Order Management to commit the order **and** synchronously asks AI Promise Time for the promised pickup / delivery time, folding both into the POS-compatible response body before returning to the caller. AI Promise Time is reached over a plain HTTP sync call (not the Kafka bus) on this path; only the brand POS receives the promise time in the response — KDS / vendor callers never do.
 
 ### Order Modification / Cancellation
 
@@ -85,7 +91,7 @@ The gateway is *not* the dispatch boundary. Driver-side, customer-side, and DaaS
 
 ### Day Open / Day Close
 
-There is no dedicated day-open or day-close HTTP route. The day-start signal is implicit: the brand POS sends an initial `fullLoad=true` `PosInsertOrders` / `PosInsertEmployees` / `PosInsertEmployeesScheduling` / `PosInsertPermissionGroups`, and Menu Management publishes the day's menu. The gateway forwards each as a normal inbound event; downstream services treat `fullLoad` as the day-open snapshot signal. Recovery after a gateway restart relies on Kafka consumer-group offsets in downstream services and on the raw audit store for replay.
+There is no dedicated day-open or day-close HTTP route. The day-start signal is implicit: the brand POS sends an initial `fullLoad=true` `PosInsertOrders` / `PosInsertEmployees` / `PosInsertEmployeesScheduling` / `PosInsertPermissionGroups`. The gateway forwards each as a normal inbound event; downstream services treat `fullLoad` as the day-open snapshot signal. Recovery after a gateway restart relies on Kafka consumer-group offsets in downstream services and on the raw audit store for replay. (Menu-publish at day-open is deferred — see §2.)
 
 ### Exception Flows
 
@@ -175,27 +181,6 @@ Payload field lists are top-level only.
 **Source service:** Brand labor / IT.
 **Trigger today:** `POST /PosInsertPermissionGroups` (`PermissionGroupsXml` or JSON).
 **Action on receipt:** Publish permission-group definitions for Employee Service / Auth.
-
-### Menu Management
-
-#### `algo.menu.published.v1`
-
-**Source service:** Menu Management — today the `kfcmenuservice` webhook receiver (`POST /menu` in `kfcmenuservice/router/router.go`, payload `WebhookEvent` wrapping `WebHookPayload`: `compressedMenuLink`, `menuCode`, `menuId`, `storeNumber`, `version`, `channel`).
-**Why we consume it:** A new menu version is available for a store / channel. Today `kfcmenuservice` downloads the menu and writes its own MySQL `itemkds` table; **it does not push anything to Algo today**. In Algo 4 we make the menu-publish a first-class inbound event so Menu Service / Item Service can subscribe directly.
-**Action on receipt:** Capture, fetch the `compressedMenuLink` to materialize the menu, validate, normalize into a canonical menu event keyed by `(brand, country, storeNumber, menuId, version)`, publish. The `Menu` / `Product` / `Variant` / `Bundle` / `Slot` / `Modifier` / `OptionValue` shape from `kfcmenuservice/types/types.go` is the proposed canonical menu payload.
-**Notes:** This integration is **new work**. See §9 Open Questions for who hosts the webhook receiver. Idempotency on `(menuId, version)`.
-
-#### `algo.menu.items.upserted.v1`
-
-**Source service:** Brand menu / item-property publishers (over the POS channel).
-**Trigger today:** `POST /PosInsertItemProperties` (`PosServices.go`, routed through `genericApiPost(EventPosUpdateItemsProperties)`; accepts JSON, XML form, or form-urlencoded).
-**Action on receipt:** Publish item-property updates keyed by `(storeId, itemId)`.
-
-#### `algo.menu.combos.upserted.v1`
-
-**Source service:** Brand menu combos publisher.
-**Trigger today:** `POST /combos` and the wildcard `/combos/*` (`handler.Combos`).
-**Action on receipt:** Publish combo definitions.
 
 ### KDS (vendor devices, v2 API)
 
@@ -291,6 +276,7 @@ The following arrive over HTTP into Algo today but are **not** external — the 
 - **Async aggregator callbacks** (`OnAggMessage`, `OnETAmessage` on the aggregator RabbitMQ queues): these arrive via the **Outbound (Cloud) Gateway's DaaS Kafka consumer** in Algo 4, not through this gateway.
 - **Telematics GPS pull** (`IgnitionEvent.go` `GetGppNotificationsFromServer`): Algo *polls* an external server; nothing is pushed in. Not an inbound event.
 - **QA-only:** `POST /demo/*` behind `AllowQaCommands` — do not migrate.
+- **Menu Management (deferred):** the `kfcmenuservice` webhook chain (`POST /menu`), `POST /PosInsertItemProperties`, `POST /combos`, and any other menu-publish surface are not covered in this iteration. They will be added back once the menu integration is designed.
 
 ## 5. Events Emitted
 
@@ -304,7 +290,7 @@ rawRequestRef, data{}).
 ### `algo.pos.order.received.v1`
 **Emitted when:** A `POST /PosInsertOrders` request has been captured, validated and normalized, **or** a message has been pulled from `{routingKey}-cloud-orders`.
 **Payload summary:** Per-order envelope with `storeId`, `orderId`, `saleType`, addresses, `items[]`, payments, `fullLoad` flag, `sourceEventId`, `rawRequestRef`.
-**Expected consumers:** Order Management (authoritative), Customer Service (address dedupe), AI Promise Time (workload signal), Quote Service (price recomputation when items change).
+**Expected consumers:** Order Management (authoritative), Customer Service (address dedupe), AI Promise Time (workload signal for non-POS flows; on the POS-sync path Promise Time is already reached over sync HTTP — see §3 / §6), Quote Service (price recomputation when items change).
 **Notes:** Partition key `storeId`. Idempotent on `(storeId, orderId, sourceEventId)`.
 
 ### `algo.pos.poll.observed.v1`
@@ -327,19 +313,6 @@ rawRequestRef, data{}).
 
 ### `algo.labor.employees.upserted.v1`, `algo.labor.schedule.upserted.v1`, `algo.labor.permission_groups.upserted.v1`
 **Expected consumers:** Employee Service. Auth service for permission groups.
-
-### `algo.menu.published.v1`
-**Emitted when:** A Menu Management webhook (today the `kfcmenuservice` chain on `POST /menu`) has been accepted *and* the gateway has fetched the menu file behind `compressedMenuLink`.
-**Payload summary:** `brandId`, `country`, `storeId`, `menuId`, `menuCode`, `version`, `channel`, `rawRequestRef` (pointer to the downloaded menu archive). Body shape matches `types.Menu` from `kfcmenuservice`.
-**Expected consumers:** Menu Service / Item Service.
-**Notes:** Today `kfcmenuservice` does not push to Algo — it writes its own MySQL table. The Algo 4 integration is a **new** push path. See §9.
-
-### `algo.menu.items.upserted.v1`
-**Emitted when:** `POST /PosInsertItemProperties` is accepted.
-**Expected consumers:** Menu Service / Item Service.
-
-### `algo.menu.combos.upserted.v1`
-**Expected consumers:** Menu Service.
 
 ### `algo.kds.order.action.v1`
 **Emitted when:** Any v2 KDS action arrives (`POST /api/order/actions`, `POST /api/orders/{orderID}`, fan-out from the multi-order `POST /api/orders/actions`).
@@ -386,7 +359,7 @@ rawRequestRef, data{}).
 ### Caller identity → source system mapping
 **Owning service:** Auth Service (TBD).
 **When fetched:** On every inbound request.
-**Why needed:** Sets `sourceSystem` (`brand-pos`, `vendor-kds`, `menu-management`, `labor-management`, `cabinet-puc`, `vision-pack`, `vision-makeline`, `cleanliness-camera`, `gps-tracker`, `cloud-order-publisher`, `vip-loyalty`, etc.) and tenancy scoping. Drives per-source rate limits and topic ACLs.
+**Why needed:** Sets `sourceSystem` (`brand-pos`, `vendor-kds`, `labor-management`, `cabinet-puc`, `vision-pack`, `vision-makeline`, `cleanliness-camera`, `gps-tracker`, `cloud-order-publisher`, `vip-loyalty`, etc.) and tenancy scoping. Drives per-source rate limits and topic ACLs.
 **How fetched:** Sync auth call on every request. Cacheable per credential / token for short windows.
 **Notes:** **Open** — the Auth Service contract is TBD per `CLAUDE.md`. The gateway must handle the "no Auth Service yet" interim case by reading `X-Station-ID` / `Bearer` / brand-shared API keys.
 
@@ -397,12 +370,12 @@ rawRequestRef, data{}).
 **How fetched:** Sync HTTP / gRPC call with a tight timeout. On timeout the gateway falls back to a "still processing" POS body so the caller does not block.
 **Notes:** Latency budget on the sync path is the most important non-functional requirement of the gateway.
 
-### Menu file behind `compressedMenuLink`
-**Owning service:** Menu Management (external CDN / S3-style link, supplied by `kfcmenuservice`'s upstream).
-**When fetched:** Synchronously inside the `POST /menu` handler before publishing `algo.menu.published.v1`.
-**Why needed:** The webhook only carries a link; the payload itself is the canonical menu and must be persisted in raw storage and referenced by `rawRequestRef`.
-**How fetched:** HTTP `GET` with 30 s timeout (mirrors current `kfcmenuservice` behavior).
-**Notes:** Open question — should this fetch happen in the gateway or in a Menu Service consumer that subscribes to a "menu link published" event?
+### AI Promise Time sync HTTP API (POS-sync flows)
+**Owning service:** AI Promise Time.
+**When fetched:** Synchronously on `POST /PosInsertOrders` for POS-originated orders, after Order Management has committed the order.
+**Why needed:** The POS response body must carry the promised pickup / delivery time for the new order so the brand POS can show it to the cashier / customer in the same screen.
+**How fetched:** Plain HTTP `POST` against AI Promise Time's sync endpoint with a tight timeout (target single-digit hundreds of ms). On timeout or 5xx, the gateway returns a `200 OK` POS body with a `still-computing` / fallback promise marker so the caller does not block.
+**Notes:** Promise Time also subscribes asynchronously to `algo.pos.order.received.v1` on the Kafka bus for non-POS flows (cloud orders, KDS-originated changes) and for workload signaling. The sync HTTP call is only on the POS-sync path; KDS / cabinet / camera / GPS responses do **not** carry a promise time. Exact field name in the POS body is TBD — see §9.
 
 ### Idempotency-key store
 **Owning service:** Self-owned (Redis / DynamoDB / Postgres TBD).
@@ -420,16 +393,16 @@ rawRequestRef, data{}).
 
 ### External-facing inbound HTTP surface
 
-**Purpose:** Be wire-compatible with every external POST that targets Algo 3 today, so brand POS / vendor KDS / Menu Management / Labor Management / cabinet / camera / GPS / VIP clients can keep their existing URLs and payload shapes.
-**Known consumers:** Brand POS, brand cloud order publishers, vendor KDS, brand Menu Management (`kfcmenuservice` upstream), brand Labor Management, brand VIP / loyalty integrations, third-party holding-cabinet PUC, pack-station / makeline / cleanliness cameras, in-store GPS / Traffilog trackers.
+**Purpose:** Be wire-compatible with every external POST that targets Algo 3 today, so brand POS / vendor KDS / Labor Management / cabinet / camera / GPS / VIP clients can keep their existing URLs and payload shapes.
+**Known consumers:** Brand POS, brand cloud order publishers, vendor KDS, brand Labor Management, brand VIP / loyalty integrations, third-party holding-cabinet PUC, pack-station / makeline / cleanliness cameras, in-store GPS / Traffilog trackers.
 **Inputs:** Every route listed in §4 with its current payload shape.
-**Returns:** POS-compatible body: `{ time, status, rowCount, errDescription, validationErrors, warnings, orders }` for POS routes; v2 routes return their existing JSON shape with `ETag` on reads and `code` + `message` on errors. The only non-`200` status produced at the HTTP layer is `415 Unsupported Media Type` on `/PosInsertNotification` when `Content-Type` is missing.
+**Returns:** POS-compatible body: `{ time, status, rowCount, errDescription, validationErrors, warnings, orders }` for POS routes; on the POS order-entry path the body also carries the promise time returned by AI Promise Time (exact field name TBD — see §9). v2 routes return their existing JSON shape with `ETag` on reads and `code` + `message` on errors and never carry a promise time. The only non-`200` status produced at the HTTP layer is `415 Unsupported Media Type` on `/PosInsertNotification` when `Content-Type` is missing.
 **Notes:** Per §2 of `CLAUDE.md`, the response contract is fixed and must be preserved verbatim. Auth is per the (TBD) Auth Service; today's behavior is brand-shared API keys + `X-Station-ID` + JWT `Bearer` on `/api/*`.
 
 ### Internal canonical-event publishing surface
 
 **Purpose:** Publish the canonical Algo event envelope (`CLAUDE.md` §"Canonical Algo Event") to Kafka topics listed in §5.
-**Known consumers:** Order Management, Customer Service, Employee Service, AI Promise Time, Quote Service, Menu Service / Item Service, makeline projection, Cabinet UI, vision projection, telematics, Audit Service.
+**Known consumers:** Order Management, Customer Service, Employee Service, AI Promise Time, Quote Service, makeline projection, Cabinet UI, vision projection, telematics, Audit Service.
 **Inputs:** Internally derived from each inbound event.
 **Returns:** Async — consumers subscribe; the gateway does not block on consumption.
 **Notes:** Partition keys are `storeId` for store-scoped topics and finer keys (`cabinetOrderId`, `carrierId`) where ordering is per-entity. Schema versioning via the `schemaVersion` envelope field.
@@ -447,19 +420,22 @@ rawRequestRef, data{}).
 - The Auth Service exists and can identify the calling external system on every inbound request (`sourceSystem`). Until it does, the gateway falls back to per-source API keys / `X-Station-ID` headers and tags `sourceSystem` accordingly.
 - Store Service exposes a cached lookup from `(externalStoreId)` → `(brand, country, canonicalStoreId)` and stays fast enough to be on the hot path.
 - Order Management exposes a sync API fast enough to satisfy the POS-compatible response-body contract within the brand POS's timeout (low hundreds of ms).
+- AI Promise Time exposes a sync HTTP endpoint fast enough to be called on the POS order-entry path within the same brand POS timeout budget as the Order Management call. A timeout / 5xx degrades to a fallback marker in the POS body, never to an HTTP-level error.
 - Every external POS / vendor KDS / camera / GPS / cabinet that posts today is willing to send the same payload to the new gateway URL — i.e. only the host changes, not the body shape, headers, or status codes.
+- The brand POS is willing to receive the promise time as an additional field in the existing POS response body without a contract change on its side (or, equivalently, the brand POS already reads the field name we settle on).
 - The raw-store, idempotency-store, retry topic, and DLQ topic are operationally provisioned before the gateway accepts traffic.
-- `kfcmenuservice` (or whatever Menu Management becomes) will be modified to push menu events into the gateway in addition to (or instead of) writing its own MySQL table. Today it does **not** push to Algo at all.
+- Menu Management is intentionally not wired up in this iteration. When it is added back, the gateway will get a dedicated Menu Management subsection in §4 / §5 and a corresponding open question on push vs. pull.
 - Cabinet hardware continues to use RabbitMQ as its transport even after Algo 4 — the gateway runs an AMQP consumer to terminate that queue and republish onto Kafka. Migrating the cabinet vendor to HTTP is out of scope for this gateway.
 - Aggregator callbacks, DaaS provider events, and mobile-driver events do **not** enter through this gateway — they enter through the Outbound (Cloud) Gateway's inbound consumer paths and are republished on the same internal topics.
 - Calls from Algo's own makeline FE, Process Center, line-management, and dispatch UIs are **internal** traffic and do not enter through this gateway. They become in-cluster RPC or direct event subscription in Algo 4.
-- The gateway never holds the POS HTTP connection open waiting for an async event response. Sync is restricted to the Order Management call described in §3 / §6.
+- The gateway never holds the POS HTTP connection open waiting for an async event response. Sync is restricted to the Order Management and AI Promise Time calls described in §3 / §6.
 - `Content-Type: application/json` enforcement (`415` on miss) applies only on `/PosInsertNotification` today. Extending it to other routes is a breaking change and requires brand sign-off.
 
 ## 9. Open Questions
 
 - **Auth Service contract is missing.** Final scheme (API key / HMAC / OAuth / mTLS) and how `sourceSystem` identity is encoded on the request. Tracked in `CLAUDE.md` Open Decisions.
-- **`kfcmenuservice` does not push to Algo today.** It receives `POST /menu`, downloads the menu, and writes MySQL. We need to decide: (a) modify `kfcmenuservice` to additionally POST a canonical menu event to the gateway, (b) have the gateway also subscribe to its own webhook by inserting itself between the upstream commerce platform and `kfcmenuservice`, or (c) have a Menu Service subscriber consume directly from `kfcmenuservice`'s DB. Recommendation: option (a).
+- **Menu Management is deferred.** All menu-publish flows (the `kfcmenuservice` webhook chain, `POST /PosInsertItemProperties`, `POST /combos`) have been pulled out of this iteration. Need a separate design pass to decide how Menu Management feeds the gateway and which canonical events it emits.
+- **AI Promise Time on the POS sync path.** Confirm (a) Promise Time exposes a sync HTTP API that meets the brand POS timeout budget end-to-end (gateway → Order Management → gateway → Promise Time → gateway), (b) the exact field name and shape the promise time takes inside the existing POS response body (`{ time, status, rowCount, errDescription, validationErrors, warnings, orders }`), (c) the fallback contract when Promise Time times out or 5xx's (return a sentinel like `promiseTime: null` with `status: "ok"`, or a soft failure status). KDS / vendor callers must not receive a promise time even on the same internal event.
 - **`POST /GetOrderUpdatesForPos` is query-shaped.** It is the one inbound HTTP that does not fit "capture → publish → respond". Confirm we are happy treating it as RPC against Order Management.
 - **GPS telematics pull (`IgnitionEvent.go`)** is currently an Algo-initiated pull against an external GPS notification server. Listed under "Not inbound events" today. Decide if the telematics vendor should switch to a push model and become a first-class inbound event, or stay as a separate adapter.
 - **`POST /UpdateOrderItemAnalysisMakeLine` carries images.** Confirm payload-size limit, blob-storage destination, and that the canonical event only carries a `rawRequestRef`.
