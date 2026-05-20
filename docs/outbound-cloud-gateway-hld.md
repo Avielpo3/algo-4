@@ -242,24 +242,9 @@ For inbound traffic, the Cloud Gateway adapters set:
 - `sourceEventId` to whatever stable identifier the upstream provided.
 - `rawRequestRef` to the location of the original payload if it is preserved.
 
-## Suggested Topics
+## Topic Naming
 
-Internal cloud topics consumed by the egress dispatcher (subset of the candidate topics in `CLAUDE.md`, plus operator topics):
-
-- `algo.delivery.command.*` (cloud -> DaaS)
-- `algo.order.cloud.outbound.*` (cloud -> DaaS)
-- `algo.driver.notification.*` (cloud -> Proxy -> mobile)
-- `algo.store.notification.*` (cloud -> Proxy -> mobile)
-
-Cloud topics populated by the inbound legs:
-
-- `algo.delivery.callback.*` (from DaaS)
-- `algo.provider.event.*` (from DaaS)
-- `algo.driver.location.*` (from Proxy / mobile)
-- `algo.driver.status.*` (from Proxy / mobile)
-- `algo.admin.action.*` (from Admin UI)
-
-Final topic naming is TBD and should align with the inbound side.
+The topic naming convention, event catalog, and subscription patterns are defined in `docs/event-taxonomy.md`. That document is the source of truth for topic structure, naming rules, and per-domain event lists.
 
 ## DaaS HTTP Contract Notes
 
@@ -461,8 +446,7 @@ Recommended log fields:
 | --- | --- |
 | Auth scheme Cloud GW <-> DaaS Gateway | TBD (HMAC / mTLS / OAuth / JWT) |
 | Auth scheme Admin UI users | TBD (OIDC / session / JWT) |
-| Topic naming for cloud <-> DaaS | TBD |
-| Topic naming for cloud <-> Proxy | TBD |
+| Topic naming convention | Defined in `docs/event-taxonomy.md` |
 | Idempotency key strategy on DaaS HTTP | TBD (default: `eventId`) |
 | Outbound retry / DLQ policy | TBD |
 | Outbound audit storage technology | TBD |

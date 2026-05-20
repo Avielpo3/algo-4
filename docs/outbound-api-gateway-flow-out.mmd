@@ -1,0 +1,114 @@
+flowchart TB
+  %% Algo 4 Cloud Gateway - Egress Pipeline (Algo → External)
+
+  %% === Input sources into the gateway ===
+
+  subgraph InputSources["Triggers"]
+    direction LR
+    KafkaIn["Kafka Event<br/>(from Algo 4 services)"]:::kafka
+    HttpIn["HTTP Request<br/>(from Algo 4 services)"]:::svc
+  end
+
+  %% === Gateway egress pipeline ===
+
+  subgraph CGW["Cloud Gateway — Egress Pipeline"]
+    direction TB
+
+    InputRouter{"Input type?"}
+
+    %% --- HTTP request path (sync operations) ---
+    subgraph HttpPath["HTTP Request Path (sync)"]
+      direction TB
+      ParseRequest["Parse request"]
+      OperationRouter{"Operation?"}
+      GetQuote["GetQuote<br/>POST /api/v2/deliveries/quotes"]
+      CreateDelivery["CreateDelivery<br/>POST /api/v2/deliveries"]
+      CancelDelivery["CancelDelivery<br/>DELETE /api/v2/deliveries"]
+      RateDriver["RateDriver<br/>POST /api/v2/deliveries/rate"]
+      Discovery["Discovery<br/>POST /api/v1/discovery"]
+      HttpResponse["Return HTTP response<br/>(201 / 200 / 4xx)"]
+    end
+
+    %% --- Kafka event path (async operations) ---
+    subgraph KafkaPath["Kafka Event Path (async)"]
+      direction TB
+      ParseEvent["Parse event"]
+      EventRouter{"Destination?"}
+      ForwardMobile["Forward to Mobile<br/>(build PsEvent)"]
+      ForwardAdmin["Forward to Admin<br/>(build response)"]
+      OtherOp["Other operation"]
+    end
+
+    InputRouter -->|"HTTP"| ParseRequest
+    InputRouter -->|"Kafka"| ParseEvent
+
+    ParseRequest --> OperationRouter
+    OperationRouter --> GetQuote
+    OperationRouter --> CreateDelivery
+    OperationRouter --> CancelDelivery
+    OperationRouter --> RateDriver
+    OperationRouter --> Discovery
+
+    ParseEvent --> EventRouter
+    EventRouter -->|"in-house courier order"| ForwardMobile
+    EventRouter -->|"admin response"| ForwardAdmin
+    EventRouter -->|"other"| OtherOp
+  end
+
+  %% === External destinations ===
+
+  DaaS["DaaS Gateway<br/>(other cluster)"]:::ext
+  Proxy["Proxy Service"]:::ext
+  Mobile["DragonDrive<br/>(Mobile)"]:::device
+  Admin["Admin Panel UI"]:::ext
+
+  %% --- HTTP path → DaaS ---
+  GetQuote -->|"HTTP POST"| DaaS
+  CreateDelivery -->|"HTTP POST"| DaaS
+  CancelDelivery -->|"HTTP DELETE"| DaaS
+  RateDriver -->|"HTTP POST"| DaaS
+  Discovery -->|"HTTP POST"| DaaS
+
+  DaaS -->|"response"| HttpResponse
+
+  %% --- Async quote response ---
+  DaaS -.->|"quote result arrives later<br/>as inbound event (see flow-in)"| KafkaIn
+
+  %% --- Kafka path → Proxy → Mobile ---
+  ForwardMobile -->|"HTTP<br/>PsEvent payload"| Proxy
+  Proxy <-->|"WebSocket<br/>(unchanged)"| Mobile
+
+  %% --- Kafka path → Admin ---
+  ForwardAdmin -->|"HTTPS response"| Admin
+
+  %% --- Retry / DLQ for async path ---
+  subgraph Reliability["Reliability"]
+    direction LR
+    Retry[("Retry")]
+    DLQ[("Dead Letter")]
+    Retry -->|"exhausted"| DLQ
+  end
+
+  ForwardMobile -->|"delivery failed"| Retry
+  OtherOp -->|"failed"| Retry
+  Retry -->|"retry"| EventRouter
+
+  %% --- Audit ---
+  Audit[("Audit Service")]:::audit
+  GetQuote -.->|"DISPATCHED"| Audit
+  CreateDelivery -.->|"DISPATCHED"| Audit
+  CancelDelivery -.->|"DISPATCHED"| Audit
+  ForwardMobile -.->|"DISPATCHED / FAILED"| Audit
+  HttpResponse -.->|"ACKED / FAILED"| Audit
+
+  %% --- Styles ---
+  classDef ext fill:#E3F2FD,stroke:#1565C0,stroke-width:1px,color:#0D47A1
+  classDef device fill:#E8F5E9,stroke:#2E7D32,stroke-width:1px,color:#1B5E20
+  classDef gw fill:#FFFDE7,stroke:#F9A825,stroke-width:1px,color:#F57F17
+  classDef audit fill:#FFF3E0,stroke:#EF6C00,stroke-width:1px,color:#E65100
+  classDef kafka fill:#F3E5F5,stroke:#6A1B9A,stroke-width:1px,color:#4A148C
+  classDef svc fill:#ECEFF1,stroke:#455A64,stroke-width:1px,color:#263238
+
+  class ParseRequest,OperationRouter,GetQuote,CreateDelivery,CancelDelivery,RateDriver,Discovery,HttpResponse gw
+  class ParseEvent,EventRouter,ForwardMobile,ForwardAdmin,OtherOp,InputRouter gw
+  class Retry,DLQ kafka

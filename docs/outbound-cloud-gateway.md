@@ -138,9 +138,10 @@ This gateway has two kinds of triggers:
      event on the internal bus (DaaS Gateway provider callbacks, Proxy
      mobile/tracker events, Admin Panel write requests).
 
-The canonical event name in each H4 heading is the *proposed* topic on the
-internal bus. The "Trigger today" field is the wire-level shape from the
-algo / daas-gateway / proxy codebases.
+The canonical event name in each H4 heading is a proposed topic on the
+internal bus — the topic naming convention is defined in
+`docs/event-taxonomy.md`. The "Trigger today" field is the wire-level shape
+from the algo / daas-gateway / proxy codebases.
 -->
 
 ### Internal bus → outbound HTTP to DaaS Gateway
@@ -551,5 +552,5 @@ the public surface offered to the rest of the cluster.
 - **Remote-access tunnel.** Confirm `ProccessRemoteAccessEvent` and `CloudRemoteAccessQueue` stay outside this gateway. Probably yes; it is an operational support concern, not a business event.
 - **Per-store identity to DaaS Gateway.** Today every store posts with the same shared credentials in `consts`. Algo 4 should attach a store-scoped identity (mirroring §6 of the Inbound API Gateway). Tracked against the Auth Service decision in `CLAUDE.md`.
 - **Mobile event TTLs.** Default per-`eventName` TTLs (Location: seconds; Order: minutes; ClearData: minutes; PushNotify: hours) — needs product input.
-- **Topic-naming standard.** Names in §4 / §5 are proposed; needs alignment with the Inbound API Gateway's taxonomy.
+- **Topic-naming standard.** The canonical topic naming convention is defined in `docs/event-taxonomy.md`.
 - **Cabinet `OnPucMessage`** is correctly *not* in scope here, but it shares the same RabbitMQ broker as the aggregator callbacks. Confirm the inbound-side cabinet handler in the Inbound API Gateway also runs an AMQP consumer, and that this gateway's AMQP consumer does not accidentally pick up cabinet messages.
