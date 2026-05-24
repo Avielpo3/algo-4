@@ -1,0 +1,47 @@
+flowchart LR
+  %% Algo 4 - POS reconciliation / status-poll flow
+  %% Solid arrows = SYNC (caller waits for an answer)
+  %%
+  %% Query-shaped inbound: the brand POS asks Algo "what changed for me?"
+  %% or "any notifications for me?" The gateway sync-reads Order Management
+  %% and returns a legacy posResponseByType body. NO canonical event is
+  %% published on the Event Bus - this is a read, not a fact.
+  %%
+  %% See docs/inbound-api-gateway/README.md s4 "Query-shaped inbound".
+
+  %% --- Actors ---
+  POS["Brand POS"]:::ext
+  GW["Inbound API Gateway<br/>(POST /GetOrderUpdatesForPos,<br/>GET or POST /GetPosNotification)"]:::gw
+  OM["Order Management<br/>(sync API - read-only)"]:::svc
+
+  Bus[("Internal Event Bus<br/>(NOT used on this flow)")]:::busOff
+
+  %% =====================================================
+  %% SYNC read-through path
+  %% (gateway proxies the question to OM)
+  %% =====================================================
+  POS ==>|"1 - POST /GetOrderUpdatesForPos<br/>or GET / POST /GetPosNotification"| GW
+
+  GW ==>|"2 - sync read"| OM
+  OM ==>|"3 - changed orders /<br/>queued notifications"| GW
+
+  GW ==>|"4 - 200 OK<br/>(posResponseByType body)"| POS
+
+  %% =====================================================
+  %% NO bus publish on this flow
+  %% (intentionally omitted - query, not a fact)
+  %% =====================================================
+  GW -.->|"no event published"| Bus
+
+  %% --- Legend ---
+  subgraph Legend["Legend"]
+    direction LR
+    A1["A"] ==>|"sync (wait for answer)"| A2["B"]
+    B1["A"] -.->|"intentionally NOT done"| B2["B"]
+  end
+
+  %% --- Styles ---
+  classDef ext fill:#E3F2FD,stroke:#1565C0,stroke-width:1px,color:#0D47A1
+  classDef gw fill:#E8F5E9,stroke:#2E7D32,stroke-width:1px,color:#1B5E20
+  classDef svc fill:#ECEFF1,stroke:#455A64,stroke-width:1px,color:#263238
+  classDef busOff fill:#F5F5F5,stroke:#9E9E9E,stroke-width:1px,color:#9E9E9E,stroke-dasharray: 4 2

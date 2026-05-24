@@ -33,7 +33,7 @@ The Gateway is responsible for the inbound boundary only. Internal services shou
 
 ```mermaid
 flowchart LR
-  %% Algo 4 Inbound API Gateway - Kafka Architecture
+  %% Algo 4 Inbound API Gateway - EventBus Architecture
 
   subgraph External["External Systems"]
     MenuManagement["Menu Management"]
@@ -52,14 +52,14 @@ flowchart LR
     Validator["Request Validator"]
     Adapter["Source Adapter"]
     ResponseBuilder["POS Response Builder"]
-    Producer["Kafka Producer"]
+    Producer["EventBus Producer"]
   end
 
   subgraph Audit["Audit Service"]
     AuditService["Raw Request + Status"]
   end
 
-  subgraph Kafka["Kafka"]
+  subgraph EventBus["EventBus"]
     BusinessTopics["Business Topics"]
     RetryTopic["Retry Topic"]
     DLQTopic["Dead Letter Topic"]
@@ -218,7 +218,7 @@ Validation can include:
 - Store or tenant routing context.
 - Duplicate detection inputs.
 
-Invalid requests should still be saved as raw data and marked as `REJECTED` in audit. They should not be published to Kafka unless a concrete rejected-request consumer is introduced later.
+Invalid requests should still be saved as raw data and marked as `REJECTED` in audit. They should not be published to EventBus unless a concrete rejected-request consumer is introduced later.
 
 ### 6. Source Adapter
 
@@ -232,9 +232,9 @@ After normalization, the Gateway publishes the canonical Algo event to the Event
 
 The Gateway should publish business events. It should not directly call every downstream service.
 
-Order Management is the exception for POS order-management request flows that need an immediate POS-compatible response. For those requests, the Gateway should synchronously call Order Management, map the result into the POS response body, and still publish relevant business events to Kafka when appropriate.
+Order Management is the exception for POS order-management request flows that need an immediate POS-compatible response. For those requests, the Gateway should synchronously call Order Management, map the result into the POS response body, and still publish relevant business events to EventBus when appropriate.
 
-The Gateway should not subscribe to Kafka and hold the POS HTTP connection open while waiting for an event response from another service. Kafka remains the asynchronous fan-out mechanism after the synchronous POS response path.
+The Gateway should not subscribe to EventBus and hold the POS HTTP connection open while waiting for an event response from another service. EventBus remains the asynchronous fan-out mechanism after the synchronous POS response path.
 
 Downstream services subscribe to the topics they care about:
 
@@ -363,7 +363,7 @@ If validation fails:
 - Mark status as `REJECTED`.
 - Do not expose detailed validation errors to the caller.
 - Return `200 OK` with a POS response body that carries the failure `status`, unless the failure is at the HTTP/header layer.
-- Stop processing without publishing to Kafka.
+- Stop processing without publishing to EventBus.
 
 ### Header Failure
 

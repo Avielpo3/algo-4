@@ -16,10 +16,10 @@ flowchart LR
 
   %% Cloud GW <-> DaaS (other cluster)
   CGW -->|"HTTP POST"| DaaS
-  DaaS -->|"Kafka<br/>provider callbacks"| CGW
+  DaaS -->|"EventBus<br/>provider callbacks"| CGW
 
   %% Cloud GW <-> Proxy <-> Mobile
-  CGW <-->|"Kafka"| Proxy
+  CGW <-->|"EventBus"| Proxy
   Proxy <-->|"WebSocket"| Mobile
 
   %% Cloud GW <-> Admin Panel UI

@@ -25,7 +25,7 @@
 
 ```mermaid
 flowchart LR
-  %% Algo 4 Inbound API Gateway - Kafka Architecture
+  %% Algo 4 Inbound API Gateway - EventBus Architecture
 
   subgraph External["External Systems"]
     MenuManagement["Menu Management"]
@@ -44,14 +44,14 @@ flowchart LR
     Validator["Request Validator"]
     Adapter["Source Adapter"]
     ResponseBuilder["POS Response Builder"]
-    Producer["Kafka Producer"]
+    Producer["EventBus Producer"]
   end
 
   subgraph Audit["Audit Service"]
     AuditService["Raw Request + Status"]
   end
 
-  subgraph Kafka["Kafka"]
+  subgraph EventBus["EventBus"]
     BusinessTopics["Business Topics"]
     RetryTopic["Retry Topic"]
     DLQTopic["Dead Letter Topic"]
@@ -156,9 +156,9 @@ Use this as the first implementation target:
 {
   "eventId": "uuid",
   "correlationId": "uuid-or-source-correlation-id",
-  "eventType": "algo.menu.updated",
+  "eventType": "orders.intake.received",
   "schemaVersion": "v1",
-  "sourceSystem": "menu-management",
+  "sourceSystem": "brand-pos",
   "sourceEventId": "external-id-if-provided",
   "brandId": "brand-or-tenant",
   "country": "country-code",
@@ -193,9 +193,9 @@ For business or processing failures that are accepted at the HTTP layer, still r
 
 If a JSON endpoint is called without the required `Content-Type: application/json` header, return `415 Unsupported Media Type` with a POS response body using `status: "Failure"` and an `errDescription` such as `Missing body Content-Type:application/json`.
 
-Order Management is a synchronous exception to the general event-publishing flow. For order-management requests that need a POS response, the Gateway should call Order Management synchronously, map the processing result into the POS response body, and publish Kafka business events when appropriate.
+Order Management is a synchronous exception to the general event-publishing flow. For order-management requests that need a POS response, the Gateway should call Order Management synchronously, map the processing result into the POS response body, and publish EventBus business events when appropriate.
 
-Do not implement POS request/response by having the Gateway subscribe to Kafka and hold the POS HTTP connection open while waiting for an event response from another service. Kafka should remain the asynchronous fan-out mechanism after the synchronous POS response path.
+Do not implement POS request/response by having the Gateway subscribe to EventBus and hold the POS HTTP connection open while waiting for an event response from another service. EventBus should remain the asynchronous fan-out mechanism after the synchronous POS response path.
 
 ## Task 1: Scaffold Go Module
 
@@ -271,13 +271,13 @@ func TestCanonicalEventMarshalJSON(t *testing.T) {
 	event := CanonicalEvent{
 		EventID:          "evt-1",
 		CorrelationID:    "corr-1",
-		EventType:        "algo.menu.updated",
+		EventType:        "orders.intake.received",
 		SchemaVersion:    "v1",
-		SourceSystem:     "menu-management",
+		SourceSystem:     "brand-pos",
 		StoreID:          "store-1",
 		RawRequestRef:    "raw-1",
 		ValidationStatus: ValidationStatusValidated,
-		Data:             json.RawMessage(`{"menuId":"menu-1"}`),
+		Data:             json.RawMessage(`{"orderId":"order-1"}`),
 	}
 
 	body, err := json.Marshal(event)
@@ -285,13 +285,13 @@ func TestCanonicalEventMarshalJSON(t *testing.T) {
 	require.JSONEq(t, `{
 		"eventId":"evt-1",
 		"correlationId":"corr-1",
-		"eventType":"algo.menu.updated",
+		"eventType":"orders.intake.received",
 		"schemaVersion":"v1",
-		"sourceSystem":"menu-management",
+		"sourceSystem":"brand-pos",
 		"storeId":"store-1",
 		"rawRequestRef":"raw-1",
 		"validationStatus":"VALIDATED",
-		"data":{"menuId":"menu-1"}
+		"data":{"orderId":"order-1"}
 	}`, string(body))
 }
 ```
@@ -727,9 +727,9 @@ Expected: server starts and listens on the configured port.
 ```bash
 curl -i -X POST http://localhost:8080/inbound/events \
   -H "Content-Type: application/json" \
-  -H "X-Source-System: menu-management" \
+  -H "X-Source-System: brand-pos" \
   -H "Idempotency-Key: demo-1" \
-  -d '{"eventType":"algo.menu.updated","menuId":"menu-1","storeId":"store-1"}'
+  -d '{"eventType":"orders.intake.received","orderId":"order-1","storeId":"store-1"}'
 ```
 
 Expected:
