@@ -1,9 +1,10 @@
 flowchart TB
-  %% Algo 4 Inbound API Gateway - Kafka Architecture
+  %% Algo 4 Inbound API Gateway - EventBus Architecture
+  %% Aligned with BYTE Kitchen and Fleet cluster diagram.
 
   %% --- Sources ---
   POS["Brand POS"]:::ext
-  OtherSources["Other Sources<br/>KDS · Labor Management · VIP · Cabinet · Vision · GPS"]:::ext
+  OtherSources["Other Sources<br/>Labor Management · VIP · Cabinet · Cloud Orders"]:::ext
 
   %% --- Gateway pipeline ---
   subgraph GW["Algo 4 Inbound API Gateway"]
@@ -11,18 +12,27 @@ flowchart TB
     Intake["HTTP Intake<br/>(POST request, header check)"]
     Capture["Raw Capture"]
     AuthGate{"Authenticated?"}
+    Shape{"Request shape?"}
     Validate{"Valid request?"}
-    Adapter["Source Adapter"]
+    Adapter["Source Adapter<br/>(normalize to canonical event)"]
     Branch{"POS sync<br/>response needed?"}
-    Producer["Kafka Producer"]
+    SyncOrch["Sync Orchestrator<br/>(call OM + Promise Time,<br/>combine results)"]
+    ReadOrch["Read-Through Orchestrator<br/>(sync OM read,<br/>no event published)"]
+    Producer["EventBus Producer<br/>(publish enriched event)"]
     RespBuilder["POS Response Builder"]
 
     Intake --> Capture
     Capture --> AuthGate
-    AuthGate -->|"yes"| Validate
+    AuthGate -->|"yes"| Shape
+    Shape -->|"fact (write)"| Validate
+    Shape -->|"query (read)<br/>/GetOrderUpdatesForPos<br/>/GetPosNotification"| ReadOrch
     Validate -->|"yes"| Adapter
     Adapter --> Branch
     Branch -->|"no · async"| Producer
+    Branch -->|"yes · POS path"| SyncOrch
+    SyncOrch -->|"combined result"| RespBuilder
+    SyncOrch -->|"enriched event<br/>(raw + OM result + promise time)"| Producer
+    ReadOrch -->|"posResponseByType body"| RespBuilder
   end
 
   %% --- Sources <-> Gateway HTTP edges ---
@@ -35,16 +45,15 @@ flowchart TB
   RespBuilder -->|"200 OK · POS body<br/>incl. promise time"| POS
   RespBuilder -->|"200 OK / v2 JSON / 415"| OtherSources
 
-  %% --- External dependencies (sync) ---
+  %% --- Sync external dependencies (POS path only) ---
   AuthSvc["Auth Service"]:::ext
-  OrderSync["Order Management<br/>Sync API"]:::ext
-  PromiseTime["AI Promise Time<br/>Sync HTTP API"]:::ext
+  OrderSync["Order Management<br/>Sync API (commit + read)"]:::svc
+  PromiseTime["AI Promise Time<br/>Sync HTTP API"]:::svc
 
   AuthGate <-->|"check"| AuthSvc
-  Branch -->|"yes · sync"| OrderSync
-  Branch -->|"yes · sync"| PromiseTime
-  OrderSync -->|"order result"| RespBuilder
-  PromiseTime -->|"promise time"| RespBuilder
+  SyncOrch <-->|"sync · commit"| OrderSync
+  SyncOrch <-->|"sync · compute time"| PromiseTime
+  ReadOrch <-->|"sync · read"| OrderSync
 
   %% --- Audit (single store, dotted arrows) ---
   Audit[("Audit Service<br/>Raw Request + Status")]:::audit
@@ -53,8 +62,8 @@ flowchart TB
   RespBuilder -.->|"REJECTED / FAILED"| Audit
   Producer -.->|"PUBLISHED / PUBLISH_FAILED"| Audit
 
-  %% --- Kafka publish path + reliability ---
-  subgraph Kafka["Kafka"]
+  %% --- EventBus publish path + reliability ---
+  subgraph EventBus["Event Bus"]
     direction LR
     Topics[("Business Topics")]
     Retry[("Retry Topic")]
@@ -67,10 +76,6 @@ flowchart TB
   Producer -->|"publish failed"| Retry
   Retry -->|"retry"| Producer
 
-  %% --- Async consumers ---
-  Consumers["Internal Services<br/>Quote · Customer · Employee · Order Mgmt · Promise Time"]:::svc
-  Topics --> Consumers
-
   %% --- Styles ---
   classDef ext fill:#E3F2FD,stroke:#1565C0,stroke-width:1px,color:#0D47A1
   classDef gw fill:#E8F5E9,stroke:#2E7D32,stroke-width:1px,color:#1B5E20
@@ -78,5 +83,5 @@ flowchart TB
   classDef kafka fill:#F3E5F5,stroke:#6A1B9A,stroke-width:1px,color:#4A148C
   classDef svc fill:#ECEFF1,stroke:#455A64,stroke-width:1px,color:#263238
 
-  class Intake,Capture,AuthGate,Validate,Adapter,Branch,Producer,RespBuilder gw
+  class Intake,Capture,AuthGate,Shape,Validate,Adapter,Branch,SyncOrch,ReadOrch,Producer,RespBuilder gw
   class Topics,Retry,DLQ kafka

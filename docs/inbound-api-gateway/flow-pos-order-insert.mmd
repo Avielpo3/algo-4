@@ -1,0 +1,46 @@
+flowchart LR
+  %% Algo 4 - PosInsertOrders sync flow (happy path only)
+  %% Solid arrows  = SYNC   (caller waits for an answer)
+  %% Dashed arrows = ASYNC  (fire-and-forget via Event Bus)
+  %%
+  %% Topic name aligned with docs/event-taxonomy.md
+  %% ({domain}.{lifecycle}.{event-name}).
+
+  %% --- Actors ---
+  POS["Brand POS"]:::ext
+  GW["Inbound API Gateway<br/>(POST /PosInsertOrders)"]:::gw
+  OM["Order Management<br/>(sync API)"]:::svc
+  PT["AI Promise Time<br/>(sync HTTP)"]:::svc
+
+  Bus[("Internal Event Bus<br/>orders.intake.received")]:::bus
+
+  %% =====================================================
+  %% SYNC path (gateway waits for an answer on each call)
+  %% =====================================================
+  POS ==>|"1 - POST PosInsertOrders"| GW
+
+  GW ==>|"2a - sync call"| OM
+  OM ==>|"3a - commit result"| GW
+
+  GW ==>|"2b - sync call"| PT
+  PT ==>|"3b - promise time"| GW
+
+  GW ==>|"4 - 200 OK<br/>(combined POS body)"| POS
+
+  %% =====================================================
+  %% ASYNC path (after response, fire-and-forget)
+  %% =====================================================
+  GW -.->|"5 - publish enriched event"| Bus
+
+  %% --- Legend ---
+  subgraph Legend["Legend"]
+    direction LR
+    A1["A"] ==>|"sync (wait for answer)"| A2["B"]
+    B1["A"] -.->|"async (fire-and-forget)"| B2["B"]
+  end
+
+  %% --- Styles ---
+  classDef ext fill:#E3F2FD,stroke:#1565C0,stroke-width:1px,color:#0D47A1
+  classDef gw fill:#E8F5E9,stroke:#2E7D32,stroke-width:1px,color:#1B5E20
+  classDef svc fill:#ECEFF1,stroke:#455A64,stroke-width:1px,color:#263238
+  classDef bus fill:#F3E5F5,stroke:#6A1B9A,stroke-width:1px,color:#4A148C

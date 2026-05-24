@@ -10,7 +10,7 @@ Algo 4 needs an Outbound (Cloud) API Gateway that owns the egress and bidirectio
 
 The Cloud Gateway is responsible for:
 
-- Translating canonical Algo events from the internal EventBus into transport-specific payloads (HTTP to DaaS, Kafka to Proxy, REST to Admin UI).
+- Translating canonical Algo events from the internal EventBus into transport-specific payloads (HTTP to DaaS, EventBus to Proxy, REST to Admin UI).
 - Receiving asynchronous events from DaaS and Proxy and re-publishing them as canonical Algo events on the internal EventBus.
 - Tracking outbound delivery outcomes for audit, retry, idempotency, and DLQ behavior.
 
@@ -21,7 +21,7 @@ The Cloud Gateway is the outbound mirror of the Inbound API Gateway: the Inbound
 Today the `DaaS Gateway` (in its own cluster) talks to Algo services using RabbitMQ. Algo 4 removes that RabbitMQ link. The new model is cluster-to-cluster:
 
 - `Algo Cloud Gateway -> DaaS Gateway`: HTTP `POST` requests (replaces RabbitMQ commands sent from Algo to DaaS).
-- `DaaS Gateway -> Algo Cloud Gateway`: Kafka events (replaces RabbitMQ events sent from DaaS to Algo).
+- `DaaS Gateway -> Algo Cloud Gateway`: EventBus events (replaces RabbitMQ events sent from DaaS to Algo).
 
 After the migration, RabbitMQ is no longer part of the boundary between Algo and the DaaS cluster.
 
@@ -31,9 +31,9 @@ After the migration, RabbitMQ is no longer part of the boundary between Algo and
 
 - Subscribe to internal EventBus topics that need to be dispatched outward (DaaS / Proxy / Admin UI).
 - Send `POST` HTTP requests to DaaS Gateway with retry, timeout, circuit breaking, signing, and outcome tracking.
-- Consume Kafka topics published by DaaS Gateway and re-publish them as canonical Algo events.
-- Publish Kafka events to Proxy Service for fan-out to mobile devices.
-- Consume Kafka events from Proxy Service that originate from mobile devices.
+- Consume EventBus topics published by DaaS Gateway and re-publish them as canonical Algo events.
+- Publish EventBus events to Proxy Service for fan-out to mobile devices.
+- Consume EventBus events from Proxy Service that originate from mobile devices.
 - Serve the Admin Panel UI over HTTP REST.
 - Authenticate and authorize Admin UI users.
 - Authenticate outbound DaaS calls (signing / mTLS / token, TBD).
@@ -46,7 +46,7 @@ After the migration, RabbitMQ is no longer part of the boundary between Algo and
 - The Proxy Service implementation and its WebSocket protocol with mobile devices.
 - The mobile application.
 - Final Auth Service contract for Admin UI users.
-- Final Kafka cluster topology, retention, and partitioning policy.
+- Final EventBus cluster topology, retention, and partitioning policy.
 - Final HTTP authentication scheme between Algo Cloud Gateway and DaaS Gateway.
 
 ## Current Design Summary
@@ -62,8 +62,8 @@ flowchart LR
 
   Bus <--> CGW
   CGW -->|"HTTP POST"| DaaS
-  DaaS -->|"Kafka"| CGW
-  CGW <-->|"Kafka"| Proxy
+  DaaS -->|"EventBus"| CGW
+  CGW <-->|"EventBus"| Proxy
   Proxy <-->|"WebSocket"| Mobile
   Admin <-->|"HTTPS REST"| CGW
 
@@ -82,11 +82,11 @@ The Cloud Gateway sits between the internal EventBus and three external surfaces
 
 | Surface | Direction (relative to Cloud GW) | Transport | Replaces |
 | --- | --- | --- | --- |
-| Internal EventBus | both | Kafka | n/a |
+| Internal EventBus | both | EventBus | n/a |
 | DaaS Gateway (other cluster) | Cloud GW -> DaaS | HTTP `POST` | RabbitMQ commands Algo -> DaaS |
-| DaaS Gateway (other cluster) | DaaS -> Cloud GW | Kafka | RabbitMQ events DaaS -> Algo |
-| Proxy Service | Cloud GW -> Proxy | Kafka | n/a (new boundary) |
-| Proxy Service | Proxy -> Cloud GW | Kafka | n/a (new boundary) |
+| DaaS Gateway (other cluster) | DaaS -> Cloud GW | EventBus | RabbitMQ events DaaS -> Algo |
+| Proxy Service | Cloud GW -> Proxy | EventBus | n/a (new boundary) |
+| Proxy Service | Proxy -> Cloud GW | EventBus | n/a (new boundary) |
 | Admin Panel UI | both | HTTPS REST | n/a |
 | Mobile Devices | indirect, via Proxy | WebSocket (Proxy <-> Mobile only) | unchanged |
 
@@ -123,9 +123,9 @@ The HTTP client is responsible for:
 
 DaaS HTTP failures are not surfaced back to the originating internal service. The Cloud Gateway absorbs them and uses retry / DLQ semantics.
 
-### 3. DaaS Kafka Consumer
+### 3. DaaS EventBus Consumer
 
-Consumes Kafka topics that the DaaS Gateway publishes (callbacks from aggregators, delivery status updates, provider events, etc.).
+Consumes EventBus topics that the DaaS Gateway publishes (callbacks from aggregators, delivery status updates, provider events, etc.).
 
 For each message:
 
@@ -136,7 +136,7 @@ For each message:
 
 This subsystem replaces the RabbitMQ-based event flow `DaaS cluster -> Algo`.
 
-### 4. Proxy Kafka Producer
+### 4. Proxy EventBus Producer
 
 Publishes canonical Algo events to Proxy topics. The Proxy Service then forwards those events to mobile devices over its own WebSocket connections (unchanged by Algo 4).
 
@@ -146,9 +146,9 @@ Concerns:
 - Order management and delivery progress events typically have ordering requirements. Partition keys should be derived from a stable identifier (store ID, driver ID, order ID, etc.).
 - Proxy publish failures use the same retry / DLQ pattern as the DaaS HTTP path.
 
-### 5. Proxy Kafka Consumer
+### 5. Proxy EventBus Consumer
 
-Consumes Kafka topics produced by the Proxy Service when mobile devices send events upward (status updates, location updates, ack/nack, login/logout). The flow inside the Cloud Gateway mirrors the DaaS Kafka consumer flow:
+Consumes EventBus topics produced by the Proxy Service when mobile devices send events upward (status updates, location updates, ack/nack, login/logout). The flow inside the Cloud Gateway mirrors the DaaS EventBus consumer flow:
 
 - Inbound adapter normalizes the proxy-shaped payload into a canonical Algo event.
 - The canonical event is published to the internal EventBus.
@@ -172,8 +172,8 @@ The Admin UI does not use WebSocket. Live-feed style requirements are served via
 
 The Cloud Gateway has a symmetric adapter layer for inbound traffic. There are at least three adapters:
 
-- DaaS Kafka adapter.
-- Proxy Kafka adapter.
+- DaaS EventBus adapter.
+- Proxy EventBus adapter.
 - Admin UI REST action adapter.
 
 Each adapter produces the same canonical Algo event envelope used elsewhere in Algo 4 (see `CLAUDE.md` for the inbound event envelope). The internal EventBus does not need to know which surface produced the event.
@@ -186,7 +186,7 @@ Every outbound delivery attempt is recorded with:
 - Destination (DaaS / Proxy / Admin REST response).
 - Adapter version.
 - Request payload reference (or hash).
-- HTTP status / Kafka publish status.
+- HTTP status / EventBus publish status.
 - Attempt number and retry decision.
 - Final status (DELIVERED / FAILED / RETRYING / DEAD_LETTERED).
 - Timestamps.
@@ -198,7 +198,7 @@ Outbound audit is separate from the Inbound Audit Service used by the Inbound Ga
 Required for two paths:
 
 - Outbound dispatch: avoid double-sending the same canonical event to DaaS or Proxy after retries.
-- Inbound consumption: avoid double-publishing the same DaaS or Proxy event into the internal EventBus when Kafka redelivers.
+- Inbound consumption: avoid double-publishing the same DaaS or Proxy event into the internal EventBus when EventBus redelivers.
 
 Possible idempotency keys:
 
@@ -215,9 +215,9 @@ Each outbound dispatch is tracked through clear internal statuses.
 | --- | --- |
 | `DISPATCH_REQUESTED` | Cloud GW received an internal canonical event for a known outbound destination. |
 | `ADAPTED` | Adapter successfully built the destination-specific payload. |
-| `IN_FLIGHT` | Transport call started (HTTP request sent / Kafka publish issued). |
-| `DELIVERED` | Destination acknowledged the message (HTTP 2xx or Kafka ack). |
-| `DELIVERY_FAILED` | Transport-layer failure (non-2xx HTTP, Kafka error). |
+| `IN_FLIGHT` | Transport call started (HTTP request sent / EventBus publish issued). |
+| `DELIVERED` | Destination acknowledged the message (HTTP 2xx or EventBus ack). |
+| `DELIVERY_FAILED` | Transport-layer failure (non-2xx HTTP, EventBus error). |
 | `RETRYING` | Scheduled for retry under the configured policy. |
 | `DEAD_LETTERED` | Retries exhausted or message classified as non-retryable. |
 
@@ -257,14 +257,14 @@ Required behavior on the cloud side:
 - Treat `2xx` as success, `4xx` as non-retryable failure (audit only), `5xx` and timeouts as retryable.
 - Carry a stable `Idempotency-Key` derived from `eventId` so DaaS can dedupe on retry.
 - Pass `brand`, `country`, `storeNo`, and any provider routing fields the DaaS handlers expect.
-- For quote-style flows, treat the `202 Accepted` async response from DaaS as a normal lifecycle stage; the actual quote answer arrives later through the DaaS Kafka consumer path.
+- For quote-style flows, treat the `202 Accepted` async response from DaaS as a normal lifecycle stage; the actual quote answer arrives later through the DaaS EventBus consumer path.
 
 The exact DaaS contract may change as DaaS retires its RabbitMQ surface. The Cloud Gateway should keep the DaaS adapter narrow so contract drift is contained.
 
 ## Proxy Service Contract Notes
 
-- Cloud -> Proxy is one-way Kafka publish from the Cloud Gateway.
-- Proxy -> Cloud is one-way Kafka publish from the Proxy Service.
+- Cloud -> Proxy is one-way EventBus publish from the Cloud Gateway.
+- Proxy -> Cloud is one-way EventBus publish from the Proxy Service.
 - Proxy <-> Mobile remains WebSocket and is not changed by Algo 4.
 - Routing context (driver, store, device) must be encoded in the event so Proxy can pick the target WS connection.
 - Topic partitioning should align with whatever sharding key Proxy uses to keep ordering per device.
@@ -289,7 +289,7 @@ sequenceDiagram
   participant Audit as "Outbound Audit"
   participant Daas as "DaaS Gateway<br/>(other cluster)"
 
-  Svc->>Bus: "publish algo.delivery.command.created"
+  Svc->>Bus: "publish delivery.provider.create_requested"
   Bus->>CGW: "deliver canonical event"
   CGW->>CGW: "DaaS Adapter builds POST body"
   CGW->>Audit: "DISPATCH_REQUESTED"
@@ -303,17 +303,17 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
   participant Daas as "DaaS Gateway<br/>(other cluster)"
-  participant DKafka as "DaaS Kafka Topic"
+  participant DEventBus as "DaaS EventBus Topic"
   participant CGW as "Cloud Gateway<br/>(DaaS Consumer + Inbound Adapter)"
   participant Bus as "Internal EventBus"
   participant Svc as "Internal Service<br/>(Order Mgmt)"
 
-  Daas->>DKafka: "publish provider callback"
-  DKafka->>CGW: "consume message"
+  Daas->>DEventBus: "publish provider callback"
+  DEventBus->>CGW: "consume message"
   CGW->>CGW: "Inbound Adapter normalizes to canonical event"
-  CGW->>Bus: "publish algo.delivery.callback.received"
+  CGW->>Bus: "publish delivery.provider.callback"
   Bus->>Svc: "deliver by topic subscription"
-  CGW-->>DKafka: "commit offset"
+  CGW-->>DEventBus: "commit offset"
 ```
 
 ### Cloud notifies a mobile driver via Proxy
@@ -322,14 +322,14 @@ sequenceDiagram
 sequenceDiagram
   participant Bus as "Internal EventBus"
   participant CGW as "Cloud Gateway<br/>(Proxy Producer)"
-  participant PKafka as "Proxy Kafka Topic"
+  participant PEventBus as "Proxy EventBus Topic"
   participant Proxy as "Proxy Service"
   participant Device as "Mobile Device"
 
-  Bus->>CGW: "deliver algo.driver.notification.assigned"
+  Bus->>CGW: "deliver orders.delivery.status_changed (status: assigned)"
   CGW->>CGW: "Proxy Adapter builds payload"
-  CGW->>PKafka: "publish (key=driverId)"
-  PKafka->>Proxy: "consume"
+  CGW->>PEventBus: "publish (key=driverId)"
+  PEventBus->>Proxy: "consume"
   Proxy->>Device: "forward over existing WebSocket"
 ```
 
@@ -339,15 +339,15 @@ sequenceDiagram
 sequenceDiagram
   participant Device as "Mobile Device"
   participant Proxy as "Proxy Service"
-  participant PKafka as "Proxy Kafka Topic"
+  participant PEventBus as "Proxy EventBus Topic"
   participant CGW as "Cloud Gateway<br/>(Proxy Consumer + Inbound Adapter)"
   participant Bus as "Internal EventBus"
 
   Device->>Proxy: "WebSocket status frame"
-  Proxy->>PKafka: "publish driver status event"
-  PKafka->>CGW: "consume"
+  Proxy->>PEventBus: "publish driver status event"
+  PEventBus->>CGW: "consume"
   CGW->>CGW: "Inbound Adapter normalizes"
-  CGW->>Bus: "publish algo.driver.status.updated"
+  CGW->>Bus: "publish courier.status.changed"
 ```
 
 ### Operator triggers a replay from the Admin UI
@@ -361,7 +361,7 @@ sequenceDiagram
 
   UI->>CGW: "HTTPS POST /admin/api/v1/deliveries/{id}/replay"
   CGW->>CGW: "validate + scope check"
-  CGW->>Bus: "publish algo.delivery.command.created"
+  CGW->>Bus: "publish delivery.provider.create_requested"
   Bus->>CGW: "egress dispatch"
   CGW->>Daas: "POST /api/v2/deliveries"
   Daas-->>CGW: "200 OK"
@@ -378,7 +378,7 @@ sequenceDiagram
 - Trip the circuit breaker on sustained failures per DaaS route.
 - Move to DLQ after retries are exhausted, preserving original canonical event and all attempt metadata.
 
-### DaaS Kafka Consumer Failure
+### DaaS EventBus Consumer Failure
 
 - A failure to publish into the internal EventBus must not commit the offset.
 - Use a poison-message handler to send malformed DaaS payloads to a DaaS-DLQ topic with the parsing error, while still committing the offset on the source topic.
@@ -414,8 +414,8 @@ Recommended metrics:
 - Circuit breaker state per DaaS route.
 - Proxy publish success / failure.
 - Admin REST request count, latency, error rate.
-- DaaS Kafka consumer lag.
-- Proxy Kafka consumer lag.
+- DaaS EventBus consumer lag.
+- Proxy EventBus consumer lag.
 - Inbound -> internal publish success / failure.
 - Retry count and DLQ count per direction and per destination.
 
@@ -458,8 +458,8 @@ Recommended log fields:
 1. Choose the auth scheme between Algo Cloud Gateway and DaaS Gateway, and define the request signing contract.
 2. Choose the auth scheme for Admin UI users, including per-user scope model.
 3. Inventory the DaaS HTTP routes the cloud actually needs, and lock the cloud-side adapter contract for each.
-4. Inventory the DaaS Kafka events the cloud needs to consume, and lock the inbound adapter contract for each.
-5. Define the Proxy Kafka topic schema and partition keys per event family.
+4. Inventory the DaaS EventBus events the cloud needs to consume, and lock the inbound adapter contract for each.
+5. Define the Proxy EventBus topic schema and partition keys per event family.
 6. Finalize the outbound delivery outcome model and the audit schema.
 7. Define retry and DLQ policy per direction and per destination.
 8. Add one sequence diagram per critical business flow that crosses the cloud boundary.
@@ -468,5 +468,5 @@ Recommended log fields:
 
 - DaaS Gateway today is a Go service at `bitbucket.org/dragontailcom/daas-gateway` running in a separate cluster. It uses `chi` for HTTP, `rabbitmq/amqp091-go` for messaging, and Postgres for persistence.
 - DaaS already exposes HTTP routes such as `/api/v1/*`, `/api/v2/deliveries`, `/api/v2/deliveries/quotes`, `/api/v2/deliveries/eta`, and `/callbacks/{brand}/{country}/{storeNo}`. The cloud-side DaaS adapter should target this surface rather than introducing a parallel one.
-- Proxy <-> Mobile remains WebSocket; the migration only affects the Proxy <-> Algo link, which becomes Kafka.
+- Proxy <-> Mobile remains WebSocket; the migration only affects the Proxy <-> Algo link, which becomes EventBus.
 - The Inbound Gateway and the Outbound (Cloud) Gateway share the same canonical Algo event envelope and the same structured-logging conventions; they should be operated as a pair.
