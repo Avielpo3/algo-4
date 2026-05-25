@@ -204,7 +204,6 @@ Cross-cutting:
 | `delivery.provider.created` / `create_failed` | Cloud Gateway | Order Mgmt, Dispatch |
 | `delivery.provider.callback` / `eta_updated` | Cloud Gateway | Order Mgmt, Dispatch, AI Promise Time |
 | `delivery.provider.canceled` | Cloud Gateway | Order Mgmt, Dispatch |
-| `delivery.provider.discovery_received` | Cloud Gateway | Dispatch |
 
 ### Customer domain (`customer.*`) — keyed by `customerId` (or `vipKey`)
 

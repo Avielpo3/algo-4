@@ -243,7 +243,6 @@ All status values inside payloads use `snake_case` to match topic-name segments.
 | `delivery.provider.created` / `create_failed` | `{ orderId, providerId, aggOrderId, status }` | DaaS → Algo (via Cloud Gateway) |
 | `delivery.provider.callback` / `eta_updated` | `{ aggregatorId, aggOrderId, deliveryStatus, courier, pickupETA }` | DaaS → Algo (via Cloud Gateway) |
 | `delivery.provider.canceled` | `{ orderId, providerId, aggOrderId, reason }` | DaaS → Algo (via Cloud Gateway) |
-| `delivery.provider.discovery_received` | `{ providerId, providerConf }` | DaaS → Algo (via Cloud Gateway) |
 | `admin.action.polygon_updated` / `store_updated` / `provider_updated` / `replay_requested` | `{ action, data }` | Admin Panel → Algo (via Cloud Gateway) |
 | `admin.notification.posted` | `{ storeId, kdsList, notification, time }` | Brand POS → Algo (operator-posted station notification) |
 | `admin.permission_group.upserted` | `{ groupId, permissions: […] }` | Brand POS → Algo (Labor Management feed) |
@@ -383,7 +382,6 @@ Delivery-domain events represent the interaction between Algo and third-party lo
 | `delivery.provider.callback` | Cloud Gateway | Provider status update (assigned, picked up, nearby, etc.) |
 | `delivery.provider.eta_updated` | Cloud Gateway | Provider pushed ETA update |
 | `delivery.provider.canceled` | Cloud Gateway | 3PL delivery canceled |
-| `delivery.provider.discovery_received` | Cloud Gateway | Provider config refreshed |
 
 **Partition key:** `storeId` (all provider events for a store are ordered together).
 
@@ -521,7 +519,7 @@ The Cloud Gateway is a **consumer + translator** of entity events for device del
 |---|---|
 | `delivery.provider.callback` | DaaS callbacks |
 | `delivery.provider.quote_received` / `quote_failed` | DaaS responses |
-| `delivery.provider.created` / `create_failed` / `canceled` / `eta_updated` / `discovery_received` | DaaS responses + callbacks |
+| `delivery.provider.created` / `create_failed` / `canceled` / `eta_updated` | DaaS responses + callbacks |
 | `orders.delivery.status_changed` | Mobile via Proxy (`arrived_to_store`, `enroute`, `delivered`, `unable_to_deliver`) |
 | `courier.status.changed` | Mobile via Proxy |
 | `courier.location.updated` | Mobile via Proxy |

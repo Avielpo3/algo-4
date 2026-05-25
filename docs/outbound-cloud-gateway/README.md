@@ -44,7 +44,7 @@ The Outbound (Cloud) Gateway is the single egress point through which the Algo 4
 
 ### In Scope
 
-- Subscribe to internal "delivery intent" EventBus events (quote requested, delivery created / updated / canceled, ETA requested, rating posted, discovery requested) and translate them into the DaaS Gateway HTTP contract used today (`POST /api/v2/deliveries/quotes`, `POST /api/v2/deliveries`, `POST /api/v2/deliveries/eta`, `POST /api/v2/deliveries/rate`, `DELETE /api/v2/deliveries`, `POST /api/v1/discovery`, plus `POST /mp/{provider}/order/status` and `POST /mp/{provider}/order/switch` for marketplace decisions). Paths/structs are the ones defined in `algo/pkg/consts/constValues.go` (`EtaPath`, `QuotePath`, `DeliveryPath`, `CarrierRatingPath`, `DiscoveryPath`, `SwitchOrderToMPPath`, `UpdateMPOrderStatusPath`) and in `daas-gateway/api/handler/router.go`.
+- Subscribe to internal "delivery intent" EventBus events (quote requested, delivery created / updated / canceled, ETA requested, rating posted) and translate them into the DaaS Gateway HTTP contract used today (`POST /api/v2/deliveries/quotes`, `POST /api/v2/deliveries`, `POST /api/v2/deliveries/eta`, `POST /api/v2/deliveries/rate`, `DELETE /api/v2/deliveries`, plus `POST /mp/{provider}/order/status` and `POST /mp/{provider}/order/switch` for marketplace decisions). Paths/structs are the ones defined in `algo/pkg/consts/constValues.go` (`EtaPath`, `QuotePath`, `DeliveryPath`, `CarrierRatingPath`, `SwitchOrderToMPPath`, `UpdateMPOrderStatusPath`) and in `daas-gateway/api/handler/router.go`.
 - Subscribe to internal "device-bound" entity EventBus events (`orders.delivery.status_changed`, `orders.delivery.bid_offered`, `courier.session.configured`, `courier.session.cleared`, `courier.available_orders.updated`, `courier.message.posted`, `courier.message.expired`, `orders.delivery.route_planned`, …) and translate each one in code into the device wire format `helper.PsEvent` (Order, Carrier, Location, AppData, ClearData, ClearNotifications, PushNotify, TrackOrder, Geofence, Checklist, StoreStatus, BidRequest, Panic, AvailableOrders, MobileParameters, …) on the Proxy ingress channel, replacing the Algo→Proxy WebSocket `sendEventsToProxy` loop in `algo/ProxyClient.go` (the inner `eventName` set is the `SuppotredEvents` array sent on `LoginToProxy`).
 - Consume DaaS Gateway provider callbacks on EventBus and republish them as canonical Algo events on the internal bus. Today these arrive over RabbitMQ as the aggregator callback queue (`{routingKey}` → `OnAggMessage` in `algo/AggregatorsEvents.go`), the ETA queue (`{routingKey}-eta-v2` → `OnETAmessage`), and the quote queue (`{routingKey}-quote` → `OnMultiDaasQuote`). The wire shape matches `daas-gateway/api/handler/callback.go` (`AlgoCallback { providerID, targets[], courier{} }`) and the `AggMessage` shape Algo unmarshals today.
 - Consume Proxy mobile/tracker events on EventBus and republish them onto the internal bus: courier location pings (`POST /setCarrierLocation` → `locationHandler` in `proxy/DragonTrack.go`, plus telematics on RabbitMQ `{routingKey}-courier-location`), per-event replies and acks from devices (`PsEvent.Reply`), and the tracker-service v2 events (`forwardeventstotrackerv2` — `carrier`, `order`, `location` in `proxy/eventForwarders.go`). Today these flow over the bidirectional WebSocket between Algo's `ProxyClient.go` and the Proxy `conn.go`.
@@ -97,7 +97,6 @@ This is the gateway's busiest flow. Two halves:
   - `delivery.provider.eta_requested` → `POST /api/v2/deliveries/eta` (today `consts.EtaPath`; daas-gateway hard-routes to Urbanpiper).
   - `delivery.provider.cancel_requested` → `DELETE /api/v2/deliveries`.
   - `delivery.provider.rate_requested` → `POST /api/v2/deliveries/rate` (today `consts.CarrierRatingPath`).
-  - `delivery.provider.discovery_requested` → `POST /api/v1/discovery` (today `sendAggServiceDiscovery` in `algo/AggregatorsAPI.go`).
   - `orders.marketplace.switched` → `POST /mp/{provider}/order/switch`; `orders.marketplace.status_changed` → `POST /mp/{provider}/order/status`.
   - **No transport topic for device-bound events.** CGW subscribes to entity topics (`orders.delivery.status_changed`, `orders.delivery.bid_offered`, `courier.session.configured`, `courier.session.cleared`, `courier.available_orders.updated`, `courier.message.posted`, `courier.message.expired`, …) and translates each one in code into a device-shaped `PsEvent` (Order, Carrier, Location, ClearData, PushNotify, TrackOrder, …) on the Proxy ingress channel, replacing `ProxyClient.go`'s outbound WebSocket frames.
 - **Inbound (cloud → Algo):**
@@ -115,7 +114,7 @@ This is the gateway's busiest flow. Two halves:
 
 ### Day Open / Day Close
 
-- No dedicated day-open / day-close call on the cloud side. At store boot, the gateway re-establishes its DaaS Gateway HTTP session, opens its Proxy ingress / egress EventBus consumers, and runs `delivery.provider.discovery_requested` to refresh the per-provider configuration (the `sendAggServiceDiscovery` loop in `algo/AggregatorsAPI.go`).
+- No dedicated day-open / day-close call on the cloud side. At store boot, the gateway re-establishes its DaaS Gateway HTTP session and opens its Proxy ingress / egress EventBus consumers.
 - Mobile devices treat their own reconnect as the day-open signal; the gateway just forwards whatever events flow.
 - Admin Panel UI sessions are long-lived; nothing special at day boundaries.
 
@@ -157,7 +156,6 @@ Topics CGW **subscribes** to. Each row is detailed in §4.3 (DaaS) or §4.4 (Pro
 
 | Family | Internal bus topic (subscribe) | Outbound action | Today's wire path |
 | --- | --- | --- | --- |
-| DaaS | `delivery.provider.discovery_requested` | `POST /api/v1/discovery` → DaaS Gateway | `algo/AggregatorsAPI.go` → `sendAggServiceDiscovery` → `consts.DiscoveryPath` |
 | DaaS | `delivery.provider.quote_requested` | `POST /api/v2/deliveries/quotes` → DaaS Gateway (sync single-provider OR async multi-DaaS via 202) | `algo/AggregatorsAPI.go` → `AggRequest.SendQuote` → `consts.QuotePath` |
 | DaaS | `delivery.provider.create_requested` | `POST /api/v2/deliveries` → DaaS Gateway | `algo/AggregatorsAPI.go` → `AggRequest.SendDelivery` → `consts.DeliveryPath` |
 | DaaS | `delivery.provider.eta_requested` | `POST /api/v2/deliveries/eta` → DaaS Gateway (always Urbanpiper-backed) | `algo/AggregatorsAPI.go` → `AggRequest.SendEtaRequest` → `consts.EtaPath` |
@@ -191,14 +189,13 @@ Topics CGW **publishes** when an external peer pushes something into the cluster
 | DaaS | DaaS Gateway quote response (sync single-provider) | `delivery.provider.quote_received` | HTTP `200 OK` synchronous reply on `/quotes` → `GetAggregatorCarrier` |
 | DaaS | DaaS Gateway quote response (multi-DaaS async) | `delivery.provider.quote_received` | RabbitMQ `…-v2-quote` → `OnMultiDaasQuote` (only when `store.multiDaasEnabled()`) |
 | DaaS | DaaS Gateway "no successful quote" / `JSONResp.status = error` | `delivery.provider.quote_failed` | Sync HTTP error or async on `…-v2-quote`; `proxy_helper.ErrNoSuccessfulQuoteFound` in daas-gateway |
-| DaaS | DaaS Gateway create accept (delivery created, provider assigned) | `delivery.provider.created` | Folded into the synchronous `200 OK` body of `/api/v2/deliveries`; today reflected through the first `Assigned` callback |
-| DaaS | DaaS Gateway create reject (`4xx` / `5xx`) | `delivery.provider.create_failed` | Sync HTTP error path → `UpdateAggError`; today no separate bus event |
-| DaaS | DaaS Gateway ETA response (synchronous) | `delivery.provider.eta_received` | HTTP `200 OK` reply on `/eta` |
+| DaaS | DaaS Gateway create accept (delivery created, provider assigned) | `delivery.provider.created` | Folded into the synchronous `200 OK` body of `/api/v2/deliveries`; today reflected through the first `Assigned` callback — **TBD: sync reply or async bus event in Algo 4?** |
+| DaaS | DaaS Gateway create reject (`4xx` / `5xx`) | `delivery.provider.create_failed` | Sync HTTP error path → `UpdateAggError`; today no separate bus event — **TBD: sync reply or async bus event in Algo 4?** |
+| DaaS | DaaS Gateway ETA response (synchronous) | `delivery.provider.eta_received` | HTTP `200 OK` reply on `/eta` (Urban Piper–specific — daas-gateway hard-routes `/eta` to the `urbanpiper` provider; only fired by Algo's `CheckForNewMarketPlaceOrders` for MP sources like Zomato/Swiggy, operationally India-only today) |
 | DaaS | DaaS Gateway rider-ETA stream | `delivery.provider.eta_updated` | RabbitMQ `…-v2-eta-v2` → `OnETAmessage`; `quoteId == "rider_eta"` |
 | DaaS | DaaS Gateway cancel ack (DELETE) | `delivery.provider.canceled` | Sync HTTP ack + synthetic `Cancelled` callback published by daas-gateway `sendCancellationAuditMessage` |
-| DaaS | DaaS Gateway cancellation audit (audit-only) | `delivery.provider.cancellation_audited` | RabbitMQ `provider_callbacks` audit queue inside daas-gateway |
+| DaaS | DaaS Gateway cancellation audit (audit-only) | `delivery.provider.cancellation_audited` | RabbitMQ `provider_callbacks` audit queue inside daas-gateway — audit-callbacks flow for order-level visibility, not a business signal |
 | DaaS | DaaS Gateway marketplace ack | `orders.marketplace.acked` | Sync HTTP ack on `/mp/{provider}/order/status` and `/mp/{provider}/order/switch`; today no bus event |
-| DaaS | DaaS Gateway discovery response | `delivery.provider.discovery_received` | Sync HTTP body on `/api/v1/discovery`; today logged only |
 | Proxy | Mobile `Login` `PsEvent` | (consumed locally; CGW emits `courier.status.changed: logged_in` after Algo accepts the login) | `proxy/PsEvents.go` → `ProcessLoginEvent` → store WS |
 | Proxy | Mobile `Logout` `PsEvent` | `courier.status.changed` (status: `logged_out`) | Pass-through `Logout` PsEvent |
 | Proxy | Mobile `Location` `PsEvent` and Dragon Track UI `POST /setCarrierLocation` | `courier.location.updated` | `proxy/PsEvents.go` `ProcessLocationEvent`; `proxy/DragonTrack.go` `locationHandler` |
@@ -216,9 +213,9 @@ Topics CGW **publishes** when an external peer pushes something into the cluster
 | Proxy | Mobile `AvailableOrders` request/response | `courier.available_orders.updated` (echo / audit) | `proxy/PsEvents.go` → `ProcessAvailableOrdersEvent` |
 | Proxy | Mobile `StatsByRange` / `HistoricOrderList` | `courier.stats.queried` / `courier.orders.history_queried` (audit-only sync read-through) | `proxy/PsEvents.go` |
 | Proxy | Mobile `StartUpOptions` | `courier.session.configured` (echo as ack) | `proxy/PsEvents.go` → `ProcessStartUpOptionsEvent` |
-| Proxy | Dragon Track UI `POST /deliveryRoute` | `orders.delivery.route_planned` | `proxy/DragonTrack.go` |
-| Proxy | Dragon Track UI `POST /messageDriver` | `courier.message.posted` (sourceSystem `dragon_track_ui`) | `proxy/DragonTrack.go` |
-| Proxy | Dragon Track UI `POST /drivethrough` | `orders.delivery.drivethrough_observed` | `proxy/DragonTrack.go`; PsEvent `eventName: driveThrough` |
+| Proxy | Dragon Track UI `POST /deliveryRoute` | `orders.delivery.route_planned` | `proxy/DragonTrack.go` — planned to move outside Algo; if it stays, served synchronously via CGW |
+| Proxy | Dragon Track UI `POST /messageDriver` | `courier.message.posted` (sourceSystem `dragon_track_ui`) | `proxy/DragonTrack.go` — planned to move outside Algo; if it stays, served synchronously via CGW |
+| Proxy | Dragon Track UI `POST /drivethrough` | `orders.delivery.drivethrough_observed` | `proxy/DragonTrack.go`; PsEvent `eventName: driveThrough` — planned to move outside Algo; if it stays, served synchronously via CGW |
 | Proxy | Device `ApproveDevice` reply | `courier.device.approval_result` | `proxy/PsEvents.go` → `ProcessReply` |
 | Cross-cutting | Any outbound or inbound message lifecycle transition | `audit.outbound.lifecycle` | New in Algo 4 — no equivalent today |
 
@@ -237,17 +234,7 @@ All `delivery.provider.*` and `orders.marketplace.*` topics. The Cloud Gateway i
 
 **Supported providers** are DB rows in `agg_services` plus engine-eligible providers for multi-quote: DoorDash, UberDirect, Stuart, Wolt, Urbanpiper, Pandago, Grab, Cargo, Skip, Skedadel, Shipday, Magicpin, Mensajerosurbanos, Leta, Deliveroo. New providers are added by inserting a row, not by changing code.
 
-#### 4.3.1 (Listen) `delivery.provider.discovery_requested`
-
-**Source service:** Quote Service / Delivery Management.
-**Outbound action:** `POST /api/v1/discovery` on DaaS Gateway.
-**Wire shape (request):** `proxy_helper.Delivery` with `providerID` populated (`storeID`, `country`, `brandID`, `providerID`).
-**Wire shape (response):** `JSONResp { status, data, message }` carrying provider-specific configuration (`cancellationDisabled`, `batchingEnabled`, `autoEnrouteOnAggPickup`, `callLimit`).
-**Possible values:** `JSONResp.status ∈ { "success", "error" }`. `callLimit = -1` means unlimited.
-**How consumed today:** `algo/AggregatorsAPI.go` → `sendAggServiceDiscovery` POSTs at startup and on a `time.AfterFunc(DiscoveryRetrySeconds)` loop. Response is logged only — there is no bus event today.
-**Algo 4 behaviour:** Publish the response as `delivery.provider.discovery_received`. Cache per `(storeId, providerId)` for the configured TTL; back off after N consecutive failures (today retried indefinitely).
-
-#### 4.3.2 (Listen) `delivery.provider.quote_requested`
+#### 4.3.1 (Listen) `delivery.provider.quote_requested`
 
 **Source service:** Quote Service / Delivery Management.
 **Outbound action:** `POST /api/v2/deliveries/quotes` on DaaS Gateway. Two modes:
@@ -266,7 +253,7 @@ All `delivery.provider.*` and `orders.marketplace.*` topics. The Cloud Gateway i
 **How consumed today:** `algo/AggregatorsAPI.go` → `AggRequest.SendQuote()` from `GetAggregatorCarrier` and `CheckAggForOrders`. Sync replies are unmarshalled inline. Async replies are consumed in `algo/rabbitmq.go` → `OnMultiDaasQuote`, registered only when `store.multiDaasEnabled()`.
 **Algo 4 behaviour:** Publish `delivery.provider.quote_received` on success or `delivery.provider.quote_failed` on `JSONResp.status == "error"` / `proxy_helper.ErrNoSuccessfulQuoteFound`.
 
-#### 4.3.3 (Listen) `delivery.provider.create_requested`
+#### 4.3.2 (Listen) `delivery.provider.create_requested`
 
 **Source service:** Delivery Management.
 **Outbound action:** `POST /api/v2/deliveries` on DaaS Gateway.
@@ -281,7 +268,7 @@ All `delivery.provider.*` and `orders.marketplace.*` topics. The Cloud Gateway i
 **How consumed today:** `algo/AggregatorsAPI.go` → `AggRequest.SendDelivery()` from `sendDeliverySetCarrier()`. On success: `SetOrderAggCarrierId`, `setFakeAggCarrier`, then `checkAndFetchMissingEvents` is scheduled. On error: `UpdateAggError`. There is no separate `delivery.provider.created` bus event today — the Algo monolith waits for the first `Assigned` callback.
 **Algo 4 behaviour:** Publish `delivery.provider.created` on `200 OK`, `delivery.provider.create_failed` on `4xx` / `5xx` or `JSONResp.status == "error"`.
 
-#### 4.3.4 (Listen) `delivery.provider.eta_requested`
+#### 4.3.3 (Listen) `delivery.provider.eta_requested`
 
 **Source service:** AI Promise Time / Delivery Management.
 **Outbound action:** `POST /api/v2/deliveries/eta` on DaaS Gateway. **Always routed to Urbanpiper** by daas-gateway (`if strings.HasSuffix(req.URL.Path, "/eta") { provider = urbanpiperID }` in `daas-gateway/api/handler/proxy.go`) — no fan-out, no engine involvement, no RabbitMQ publish.
@@ -290,7 +277,7 @@ All `delivery.provider.*` and `orders.marketplace.*` topics. The Cloud Gateway i
 **How consumed today:** `algo/AggregatorsAPI.go` → `AggRequest.SendEtaRequest()` from `CheckForNewMarketPlaceOrders`. Sets a fake aggregator carrier and starts `checkAndFetchMissingEvents(..., MarketplaceOrder)`.
 **Algo 4 behaviour:** Publish `delivery.provider.eta_received` from the synchronous reply.
 
-#### 4.3.5 (Listen) `delivery.provider.cancel_requested`
+#### 4.3.4 (Listen) `delivery.provider.cancel_requested`
 
 **Source service:** Delivery Management / Order Management.
 **Outbound action:** `DELETE /api/v2/deliveries` on DaaS Gateway.
@@ -312,7 +299,7 @@ AlgoCallback {
 **How consumed today:** `algo/AggregatorsAPI.go` → `CancelDelivery`, `CancelOrdersInBatch`, `CancelLastWaitingAggOrder`. The eventual provider-side confirmation arrives through the regular callback queue as `DeliveryStatus.Cancelled`.
 **Algo 4 behaviour:** Publish `delivery.provider.canceled` on the `200 OK` ack; the callback queue still drives the authoritative state via `delivery.provider.callback`.
 
-#### 4.3.6 (Listen) `delivery.provider.rate_requested`
+#### 4.3.5 (Listen) `delivery.provider.rate_requested`
 
 **Source service:** Operator UI / post-delivery feedback.
 **Outbound action:** `POST /api/v2/deliveries/rate` on DaaS Gateway.
@@ -320,7 +307,7 @@ AlgoCallback {
 **How consumed today:** `algo/FrontEndService.go` → `RateCarrier()` → `algo/AggregatorsAPI.go SendAggCarrierRating()` → `consts.CarrierRatingPath`.
 **Algo 4 behaviour:** Fire-and-forget; no separate response event. Audit-only on the bus.
 
-#### 4.3.7 (Listen) `delivery.provider.missed_events_requested`
+#### 4.3.6 (Listen) `delivery.provider.missed_events_requested`
 
 **Source service:** Internal recovery loop.
 **Outbound action:**
@@ -332,7 +319,7 @@ AlgoCallback {
 **How consumed today:** `algo/AggregatorsAPI.go GetMissingEvents()` is called by `checkAndFetchMissingEvents` after a create or MP-ETA. Each returned `AggMessage` is fed back through `parseCallbacks("GetMissingEvents", …)`.
 **Algo 4 behaviour:** Re-emit each fetched message onto the bus as `delivery.provider.callback` with `metadata.recovery: true`.
 
-#### 4.3.8 (Listen) `orders.marketplace.status_changed`
+#### 4.3.7 (Listen) `orders.marketplace.status_changed`
 
 **Source service:** Delivery Management (`stayWithStoreCarrier` decision).
 **Outbound action:** `POST /mp/{provider}/order/status` on DaaS Gateway.
@@ -341,7 +328,7 @@ AlgoCallback {
 **How consumed today:** `algo/AggregatorsAPI.go updateMarketPlaceWithDecision()`, reading `MarketPlace / retryMaxAttempts` and `MarketPlace / retryMaxSeconds`. On accept, sets `OrderFlowAlerts_StayWithStoreCarrier`.
 **Algo 4 behaviour:** Publish `orders.marketplace.acked` on success.
 
-#### 4.3.9 (Listen) `orders.marketplace.switched`
+#### 4.3.8 (Listen) `orders.marketplace.switched`
 
 **Source service:** Delivery Management (`switchOrderToMPCarrier` decision).
 **Outbound action:** `POST /mp/{provider}/order/switch` on DaaS Gateway.
@@ -351,7 +338,7 @@ AlgoCallback {
 
 ---
 
-#### 4.3.10 (Publish) `delivery.provider.callback`
+#### 4.3.9 (Publish) `delivery.provider.callback`
 
 **External trigger:** Provider callback published by daas-gateway. Every 3PL eventually flows through `daas-gateway/api/handler/callback.go Callback` on `POST /callbacks/{brand}/{country}/{storeNo}` or `POST /callbacks/{brand}/{franchisee}/{country}/{storeNo}`. Returns `202 Accepted` to the 3PL and republishes verbatim to RabbitMQ.
 **Today's transport:** RabbitMQ queue `{brand}-{country}-{externalStoreId}-v2` (no suffix), TTL 15 min, declared with DLQ at `{queue}_DLQ`.
@@ -385,12 +372,12 @@ AlgoCallback {
 | 8 | Nearby |
 
 **Possible values — `Courier.loginStatus`:** `"online"`, `"offline"` (case-insensitive). Used only when `DeliveryStatus.CourierLogin` is set.
-**Possible values — `quoteId` reserved markers:** `"rider_eta"` (ETA-update marker, see §4.3.13), `"mp"` (marketplace-flow marker).
+**Possible values — `quoteId` reserved markers:** `"rider_eta"` (ETA-update marker, see §4.3.12), `"mp"` (marketplace-flow marker).
 
 **How consumed today:** `algo/rabbitmq.go` → `OnAggMessage` → `algo/AggregatorsEvents.go parseCallbacks()`. The `switch` handles `CourierLogin`, `Assigned`, `PickedUp`, `Delivered`, `Cancelled` plus nested courier sub-statuses. `Scheduled` / `Waiting` skip the switch but still update location and audit via `CarrierLocation()`.
 **Algo 4 behaviour:** Publish `delivery.provider.callback` partition-keyed by `storeId`. Idempotency tuple: `(storeId, aggOrderId, deliveryStatus, courierStatus, updatedAt)`. The `CourierLogin` path is split off into `courier.status.changed` per `event-taxonomy.md`. `Cancelled` callbacks emitted as a side-effect of DELETE also drive `delivery.provider.canceled` for the synchronous-cancel correlation.
 
-#### 4.3.11 (Publish) `delivery.provider.quote_received` / `delivery.provider.quote_failed`
+#### 4.3.10 (Publish) `delivery.provider.quote_received` / `delivery.provider.quote_failed`
 
 **External trigger:** DaaS Gateway response on `POST /api/v2/deliveries/quotes`.
 
@@ -406,46 +393,40 @@ AlgoCallback {
 **How consumed today:** Sync replies → `algo/AggregatorsAPI.go GetAggregatorCarrier`. Async replies → `algo/rabbitmq.go OnMultiDaasQuote` (only when `store.multiDaasEnabled()`). On `OnMultiDaasQuote`: updates `aggProvider`, pickup ETA, provider config cache, signals `QuoteConsumedFromQueue`.
 **Algo 4 behaviour:** Publish `delivery.provider.quote_received` on success keyed by `(storeId, orderIDs[0])`. On error or `proxy_helper.ErrNoSuccessfulQuoteFound`, publish `delivery.provider.quote_failed` carrying `reason` so Delivery Management can fall back via `stayWithStoreCarrier`.
 
-#### 4.3.12 (Publish) `delivery.provider.created` / `delivery.provider.create_failed`
+#### 4.3.11 (Publish) `delivery.provider.created` / `delivery.provider.create_failed`
 
 **External trigger:** DaaS Gateway response on `POST /api/v2/deliveries`.
-**Wire shape:** Same `JSONResp { data: AggMessage }` as the create reply (see §4.3.3).
+**Wire shape:** Same `JSONResp { data: AggMessage }` as the create reply (see §4.3.2).
 **Possible values:** HTTP `200` = created; `4xx` / `5xx` or `JSONResp.status == "error"` = failed.
 **How consumed today:** No distinct bus event — algo `sendDeliverySetCarrier` writes the result to local DB and waits for the first `delivery.provider.callback` with `DeliveryStatus.Assigned`.
-**Algo 4 behaviour:** Publish a focused success / failure event so Order Management and Delivery Management can react before the first callback arrives.
+**Algo 4 behaviour:** Publish a focused success / failure event so Order Management and Delivery Management can react before the first callback arrives. **TBD: stay synchronous on the HTTP reply (Delivery Management waits for `200 OK` / error inline) or async via these bus events?** Affects how Delivery Management is structured — if async, the original requester must correlate via `correlationId` and accept that the create result arrives out-of-band.
 
-#### 4.3.13 (Publish) `delivery.provider.eta_received` / `delivery.provider.eta_updated`
+#### 4.3.12 (Publish) `delivery.provider.eta_received` / `delivery.provider.eta_updated`
 
 **External trigger:**
 - `eta_received`: synchronous response on `POST /api/v2/deliveries/eta` (Urbanpiper-backed).
 - `eta_updated`: provider-pushed rider ETA stream — `AggMessage` with `quoteId == "rider_eta"` published on RabbitMQ `{brand}-{country}-{externalStoreId}-v2-eta-v2`.
 
-**Wire shape:** `AggMessage` (see §4.3.10), single order in `targets[0]`.
+**Wire shape:** `AggMessage` (see §4.3.9), single order in `targets[0]`.
 **How consumed today:** `algo/rabbitmq.go OnETAmessage` (registered when MP sources are configured) → `UpdateOrderQuotePickUpTime`, `CreateAggUpdate`. Sync ETA reply consumed inline in `algo/AggregatorsAPI.go`.
 **Algo 4 behaviour:** Publish a focused ETA-update event keyed by `(storeId, aggOrderId)`.
 
-#### 4.3.14 (Publish) `delivery.provider.canceled` / `delivery.provider.cancellation_audited`
+#### 4.3.13 (Publish) `delivery.provider.canceled` / `delivery.provider.cancellation_audited`
 
 **External trigger:**
 - `canceled`: synchronous `200 OK` on `DELETE /api/v2/deliveries`, plus the synthetic `Cancelled` callback published by daas-gateway `sendCancellationAuditMessage` to the default callback queue.
-- `cancellation_audited`: audit-only side-channel — daas-gateway publishes `ProviderCallbackAuditMessage { Payload, CancelStatus, Brand, Country, StoreNo }` to the fixed `provider_callbacks` queue (TTL configurable via `cfg.Audit.CallbacksExpiration`, default 15 min).
+- `cancellation_audited`: audit-only side-channel — daas-gateway publishes `ProviderCallbackAuditMessage { Payload, CancelStatus, Brand, Country, StoreNo }` to the fixed `provider_callbacks` queue (TTL configurable via `cfg.Audit.CallbacksExpiration`, default 15 min). Specific to the audit-callbacks flow so support tooling has order-level visibility into every cancel; not a business signal for the cluster.
 
 **Wire shape (canceled):** Same `AggMessage` / `AlgoCallback` flow as the regular callback, with `DeliveryStatus.Cancelled (5)` and `CourierStatus.Unassigned (0)`.
 **Wire shape (cancellation_audited):** `ProviderCallbackAuditMessage { Payload []byte (raw callback body), CancelStatus *ResponseStatus (SUCCESS|FAIL on DELETE synthetic cancel), Brand, Country, StoreNo }`.
 **How consumed today:** Sync HTTP success path inside `algo/AggregatorsAPI.go CancelDelivery`. Synthetic callback flows through `OnAggMessage`. The audit queue is consumed only by daas-gateway tooling, not by algo.
 **Algo 4 behaviour:** `delivery.provider.canceled` is the authoritative cancel-acknowledged event for Order Management. `delivery.provider.cancellation_audited` is audit-only (no internal domain consumer).
 
-#### 4.3.15 (Publish) `orders.marketplace.acked`
+#### 4.3.14 (Publish) `orders.marketplace.acked`
 
 **External trigger:** DaaS Gateway sync `200 OK` on `POST /mp/{provider}/order/status` or `POST /mp/{provider}/order/switch`. Daas-gateway is a pure reverse-proxy here — body shapes are owned by the `mp-{provider}` backend service.
 **How consumed today:** No bus event — algo treats the HTTP success as terminal and writes `OrderFlowAlerts_*`.
 **Algo 4 behaviour:** Publish so Delivery Management's decision propagates and `OrderFlowAlerts` updates are bus-driven.
-
-#### 4.3.16 (Publish) `delivery.provider.discovery_received`
-
-**External trigger:** Sync HTTP body on `POST /api/v1/discovery` (see §4.3.1).
-**How consumed today:** Logged only.
-**Algo 4 behaviour:** Cached per `(storeId, providerId)` so Quote Service and Delivery Management can read provider configuration without hitting DaaS Gateway again.
 
 ---
 
@@ -453,7 +434,7 @@ AlgoCallback {
 
 These are daas-gateway-owned audit feeds. They are NOT subscribed to by algo today and are NOT in scope for the Cloud Gateway in Algo 4 (they belong to daas-gateway operations):
 
-- `provider_callbacks` — audit copy of every callback + DELETE synthetic cancel (see §4.3.14).
+- `provider_callbacks` — audit copy of every callback + DELETE synthetic cancel (see §4.3.13).
 - `store_orders` — `StoreOrderAuditMessage { Payload, Status: SUCCESS|FAIL, ErrorFromProvider }` published on every successful POST when `cfg.Audit.OrdersEnabled`.
 - `provider_quotes` — `ProviderQuotesAuditMessage { Metadata: DeliveryMetaData, Quotes[]: QuoteResponse, Errors{}, DueDate }` from the multi-DaaS quote fan-out (`cfg.Audit.QuotesEnabled`).
 - `engine_decisions` — `EngineDecisionsAuditMessage { Metadata, Decisions[]: { Provider, Chosen, Reason, Value, Limit } }`.
@@ -725,6 +706,8 @@ The Dragon Track tracker UI talks to Proxy over HTTP (`trackerListener` / `proxy
 
 `helper.DriveInfo` is the shape the algo cluster returns to `/deliveryRoute` callers (status, `OrderDetails`, `Coordinates[]`, `DriveThroughSettings`, etc.) — it's a synchronous response, not a bus event.
 
+> **Planned scope change.** `/deliveryRoute`, `/messageDriver`, and `/drivethrough` are slated to move out of Algo (Dragon Track UI talks to its own service, not to the cluster). If that move doesn't happen, the three routes stay synchronous through CGW with the wire shapes above.
+
 #### 4.4.22 (Publish) `courier.device.approval_result` and other audit-only mobile events
 
 `StatsByRange` / `HistoricOrderList` / `Register` / `KeepAlive` / `GetUpdates` / `KdsLogin` are sync read-throughs handled inside Proxy; the gateway audits them but does not necessarily fan them out to domain services. Each gets a focused audit topic only if a real consumer exists.
@@ -764,12 +747,11 @@ These cross the algo↔cloud boundary at the wire level today but belong to a di
 
 | Topic | Expected consumers (inside Algo) | Notes |
 | --- | --- | --- |
-| `delivery.provider.discovery_received` | Quote Service, Delivery Management | Cached per `(storeId, providerId)` |
 | `delivery.provider.quote_received` | Delivery Management | Single-provider sync OR multi-DaaS async folded into one topic |
 | `delivery.provider.quote_failed` | Delivery Management (`stayWithStoreCarrier` decision) | Carries `reason` |
 | `delivery.provider.created` | Order Management, Delivery Management | New in Algo 4 — today the first `Assigned` callback is the create signal |
 | `delivery.provider.create_failed` | Order Management, Delivery Management | New in Algo 4 |
-| `delivery.provider.eta_received` | AI Promise Time, Delivery Management | Synchronous reply from `/eta` |
+| `delivery.provider.eta_received` | AI Promise Time, Delivery Management | Synchronous reply from `/eta` (Urban Piper–specific — MP-only flow; daas-gateway hard-routes `/eta` to `urbanpiper`) |
 | `delivery.provider.eta_updated` | AI Promise Time | Provider-pushed `rider_eta` stream |
 | `delivery.provider.canceled` | Order Management, Delivery Management | Authoritative cancel-acknowledged event |
 | `delivery.provider.cancellation_audited` | No internal domain consumer (audit-only) | Daas-gateway-side audit echo |
@@ -819,7 +801,7 @@ These cross the algo↔cloud boundary at the wire level today but belong to a di
 
 ### Multi-DaaS / aggregator settings per store
 **Owning service:** Store Service.
-**When fetched:** On Delivery Management decisions and on `delivery.provider.discovery_requested`.
+**When fetched:** On Delivery Management decisions.
 **Why needed:** Today `algo/daas_bridge.go` `loadDaasProviders` joins `GetAggregatorsSettings` + `GetMultiDaasActivity` + `optionlist.FloatValue("Aggregators","CancellationDisabled")` to compute `DaasProvidersResponse { active, providers[] }`. The gateway needs the same to know whether to call quotes synchronously or to fan out over the multi-DaaS queue.
 
 ### Per-provider runtime credentials
@@ -866,7 +848,7 @@ These cross the algo↔cloud boundary at the wire level today but belong to a di
 ### Outbound HTTP surface to DaaS Gateway
 **Purpose:** Be wire-compatible with the DaaS Gateway routes the cluster uses today so the DaaS Gateway does not need to change for the Algo 4 cutover.
 **Known consumers:** DaaS Gateway is the consumer of the outbound calls; ultimately each call lands on a 3PL provider behind the DaaS Gateway.
-**Inputs:** `AggRequest`, `AggDiscoveryRequest`, `OrderStatusUpdate`, `SwitchOrder`, rating payload, ETA payload — exact shapes as currently produced by `algo/AggregatorsAPI.go`.
+**Inputs:** `AggRequest`, `OrderStatusUpdate`, `SwitchOrder`, rating payload, ETA payload — exact shapes as currently produced by `algo/AggregatorsAPI.go`.
 **Returns:** `AggResponse { status, data, message }`, `AggQuoteData`, `AggDeleteData` — exact shapes as consumed today.
 **Notes:** Auth scheme matches what DaaS Gateway expects (per-provider keys + the basic-auth `cfg.Auth` for the `/aggregator-services` admin routes).
 
@@ -911,13 +893,13 @@ These cross the algo↔cloud boundary at the wire level today but belong to a di
 ## 8. Operational Assumptions
 
 - Every internal service that today produces a `helper.PsEvent` and shoves it onto `con.sendChan` in `algo/ProxyClient.go` will instead publish a canonical bus event that this gateway consumes. The gateway is the **only** writer to the Proxy ingress EventBus topic.
-- Every internal service that today calls a DaaS Gateway HTTP endpoint directly (the four call sites in `algo/AggregatorsAPI.go`, the marketplace decisions in `SwitchOrderToMPCarrier` / `stayWithStoreCarrier`, the discovery loop) will instead publish a canonical bus event. The gateway is the **only** writer to DaaS Gateway HTTP.
+- Every internal service that today calls a DaaS Gateway HTTP endpoint directly (the four call sites in `algo/AggregatorsAPI.go`, the marketplace decisions in `SwitchOrderToMPCarrier` / `stayWithStoreCarrier`) will instead publish a canonical bus event. The gateway is the **only** writer to DaaS Gateway HTTP.
 - DaaS Gateway is willing to publish provider callbacks to a EventBus topic the gateway consumes (or, transitionally, the gateway continues to consume the existing RabbitMQ aggregator / quote / ETA queues — see §9).
 - Proxy is willing to consume from a EventBus topic for ingress instead of holding a WebSocket from Algo, and to publish to a EventBus topic for egress. If Proxy stays WebSocket-only in v1, this gateway runs a single WebSocket client on behalf of the whole cluster and bridges to EventBus internally — i.e. the Algo→Proxy WebSocket moves *into* the gateway, no other service holds one.
 - Mobile devices do not need to know that anything changed. The same `PsEvent` shape over the same WebSocket Proxy continues to be served by the same Proxy service.
 - DaaS Gateway's `/aggregator-services` admin surface stays where it is (`daas-gateway/api/handler/router.go` `MakeHandlers` with `middleware.BasicAuth`). The Algo 4 Admin Panel UI either calls DaaS Gateway directly for that or through this gateway as a transparent reverse-proxy — TBD §9.
 - The Admin Panel UI is cloud-hosted and reaches the gateway over HTTPS with a JWT. The current in-store-bundled admin pages (`algo/FrontEnd/` SPA mounts under `/dashboard`, `/backoffice`, etc.) keep working for backwards compatibility but new sessions land on the cloud Admin Panel.
-- Per-provider rate limits (`AvailableCalls` / `CallLimit`), retry budgets (`MarketPlace / retryMaxAttempts`, `Aggregators / DiscoveryRetrySeconds`), and per-event TTLs are configured before the gateway is allowed to accept traffic.
+- Per-provider rate limits (`AvailableCalls` / `CallLimit`), retry budgets (`MarketPlace / retryMaxAttempts`), and per-event TTLs are configured before the gateway is allowed to accept traffic.
 - The DaaS Gateway, the Proxy, and the Admin Panel UI are reachable from the gateway over the public internet with TLS — the gateway is the egress chokepoint and the only place that holds those credentials.
 - `CourierLogin` is Stuart-specific. Other 3PLs may add fleet on/off-shift signals later; the gateway must not assume the set of `DeliveryStatus` values is fixed forever.
 - `RemoteAccess` (`{routingKey}-remote-access` queue, `ProccessRemoteAccessEvent`) is not migrated into this gateway — it stays as a separate operational support channel.
