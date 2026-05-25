@@ -45,7 +45,7 @@ The Outbound (Cloud) Gateway is the single egress point through which the Algo 4
 ### In Scope
 
 - Subscribe to internal "delivery intent" EventBus events (quote requested, delivery created / updated / canceled, ETA requested, rating posted) and translate them into the DaaS Gateway HTTP contract used today (`POST /api/v2/deliveries/quotes`, `POST /api/v2/deliveries`, `POST /api/v2/deliveries/eta`, `POST /api/v2/deliveries/rate`, `DELETE /api/v2/deliveries`, plus `POST /mp/{provider}/order/status` and `POST /mp/{provider}/order/switch` for marketplace decisions). Paths/structs are the ones defined in `algo/pkg/consts/constValues.go` (`EtaPath`, `QuotePath`, `DeliveryPath`, `CarrierRatingPath`, `SwitchOrderToMPPath`, `UpdateMPOrderStatusPath`) and in `daas-gateway/api/handler/router.go`.
-- Subscribe to internal "device-bound" entity EventBus events (`orders.delivery.status_changed`, `orders.delivery.bid_offered`, `courier.session.configured`, `courier.session.cleared`, `courier.available_orders.updated`, `courier.message.posted`, `courier.message.expired`, `orders.delivery.route_planned`, …) and translate each one in code into the device wire format `helper.PsEvent` (Order, Carrier, Location, AppData, ClearData, ClearNotifications, PushNotify, TrackOrder, Geofence, Checklist, StoreStatus, BidRequest, Panic, AvailableOrders, MobileParameters, …) on the Proxy ingress channel, replacing the Algo→Proxy WebSocket `sendEventsToProxy` loop in `algo/ProxyClient.go` (the inner `eventName` set is the `SuppotredEvents` array sent on `LoginToProxy`).
+- Subscribe to internal "device-bound" entity EventBus events (`orders.delivery.status_changed`, `orders.delivery.bid_offered`, `courier.session.configured`, `courier.session.cleared`, `courier.available_orders.updated`, `courier.message.posted`, `courier.message.expired`, …) and translate each one in code into the device wire format `helper.PsEvent` (Order, Carrier, Location, AppData, ClearData, ClearNotifications, PushNotify, TrackOrder, Geofence, Checklist, StoreStatus, BidRequest, Panic, AvailableOrders, MobileParameters, …) on the Proxy ingress channel, replacing the Algo→Proxy WebSocket `sendEventsToProxy` loop in `algo/ProxyClient.go` (the inner `eventName` set is the `SuppotredEvents` array sent on `LoginToProxy`).
 - Consume DaaS Gateway provider callbacks on EventBus and republish them as canonical Algo events on the internal bus. Today these arrive over RabbitMQ as the aggregator callback queue (`{routingKey}` → `OnAggMessage` in `algo/AggregatorsEvents.go`), the ETA queue (`{routingKey}-eta-v2` → `OnETAmessage`), and the quote queue (`{routingKey}-quote` → `OnMultiDaasQuote`). The wire shape matches `daas-gateway/api/handler/callback.go` (`AlgoCallback { providerID, targets[], courier{} }`) and the `AggMessage` shape Algo unmarshals today.
 - Consume Proxy mobile/tracker events on EventBus and republish them onto the internal bus: courier location pings (`POST /setCarrierLocation` → `locationHandler` in `proxy/DragonTrack.go`, plus telematics on RabbitMQ `{routingKey}-courier-location`), per-event replies and acks from devices (`PsEvent.Reply`), and the tracker-service v2 events (`forwardeventstotrackerv2` — `carrier`, `order`, `location` in `proxy/eventForwarders.go`). Today these flow over the bidirectional WebSocket between Algo's `ProxyClient.go` and the Proxy `conn.go`.
 - Expose the cloud Admin Panel UI's HTTPS REST surface. Today the same endpoints live inside Algo (`algo/BackOffice.go`, `algo/endpoints.go` `registerBORoutes` — `/dashboard/settings`, `POST /dashboard`, `POST /dashboard/*`, `POST /getPolygons`, `POST /backoffice/getPolygons`, `/bo*`, `/backofficeHeader*`, `/backofficeNav*`, `/api/stores/self`, `/getSingleStoreNo`, `/register`, `/changePassword`, `/forgotPassword`, plus the `/api/v2/stores/{id}/daas` provider-status read from `algo/daas_bridge.go`). In Algo 4 the Admin Panel becomes a cloud-hosted UI talking to this gateway, which fronts the underlying store / dashboard / polygon services.
@@ -108,8 +108,7 @@ This is the gateway's busiest flow. Two halves:
   - DaaS cancel ack on `DELETE /api/v2/deliveries` → `delivery.provider.canceled`; the cancellation audit feed (`sendCancellationAuditMessage` in daas-gateway) → `delivery.provider.cancellation_audited`.
   - DaaS marketplace ack on `POST /mp/{provider}/order/status` and `POST /mp/{provider}/order/switch` → `orders.marketplace.acked`.
   - Mobile-side carrier waypoints (`Location` PsEvent from `proxy/conn.go readPump`, `POST /setCarrierLocation` from Dragon Track UI to `proxy/DragonTrack.go locationHandler`, and Mouters telematics RabbitMQ feed) → `courier.location.updated`.
-  - Mobile-side carrier login / logout, "in store / out of store" geofence transitions, "at customer address" geofence transitions, panic events, push-notification acks → `courier.status.changed`, `courier.message.acknowledged`. `Order` / `Carrier` acks → `orders.delivery.status_changed`. `BidRequest` ack → `orders.delivery.bid_offered`. `CancelBid` ack → `orders.delivery.bid_canceled`. (Every `PsEvent` whose direction is device → backend, today `ProxyClient.go` `readPump` → `helper.PsEvent` with empty `CarrierId` on the envelope.)
-  - Tracker UI posts to `/deliveryRoute` → `orders.delivery.route_planned`, to `/messageDriver` → `courier.message.posted`, to `/drivethrough` → `orders.delivery.drivethrough_observed`.
+  - Mobile-side carrier login / logout, `inStore` / `outOfStore` carrier acks, "at customer address" geofence transitions, panic events, push-notification acks → `courier.status.changed`, `courier.message.acknowledged`. `Order` / `Carrier` acks → `orders.delivery.status_changed`. (Every `PsEvent` whose direction is device → backend, today `ProxyClient.go` `readPump` → `helper.PsEvent` with empty `CarrierId` on the envelope.)
   - Tracker-service v2 ingestion is **outbound only** today (`forwardeventstotrackerv2` in `proxy/eventForwarders.go`). Listed for completeness; if tracker-v2 ever produces callbacks they enter through this gateway.
 
 ### Day Open / Day Close
@@ -142,7 +141,7 @@ The Cloud Gateway owns two distinct event families. Each family has its own exte
 | Family | What it covers | External peer | Transport today | Transport in Algo 4 | Canonical topics |
 | --- | --- | --- | --- | --- | --- |
 | **DaaS** (delivery / 3PL / aggregators / marketplace) | Quoting, creating, ETA, cancelling, rating 3PL deliveries, marketplace order routing, and the corresponding provider callbacks. Every event is keyed by `(storeId, providerId, aggOrderId)` or `(storeId, orderId)`. | DaaS Gateway (`bitbucket.org/dragontailcom/daas-gateway`), which fronts every 3PL: DoorDash, UberDirect, Stuart, Wolt, Urbanpiper, Pandago, Grab, Cargo, Skip, Skedadel, Shipday, Magicpin, Mensajerosurbanos, Leta, Deliveroo. The gateway picks the provider via `aggProvider` (free-text DB lookup against `agg_services.name`) — `urbanpiper` is hard-forced for `/eta` and `/marketplace/*`. | **Out:** synchronous HTTP `POST` / `DELETE` / `GET` to DaaS Gateway. **In:** RabbitMQ queues `{brand}-{country}-{externalStoreId}-v2` (callbacks), `…-v2-quote` (multi-DaaS async quote), `…-v2-eta-v2` (rider ETA stream), plus daas-gateway-internal audit queues `provider_callbacks` / `store_orders` / `provider_quotes` / `engine_decisions`. | **Out:** HTTP unchanged. **In:** EventBus topic published by daas-gateway (preferred) or daas-gateway → AMQP-bridge → EventBus during transition. | `delivery.provider.*`, `orders.marketplace.*` |
-| **Proxy** (mobile devices / Dragon Track tracker UI / TrackerV2 service / in-house fleet) | Mobile-courier WebSocket traffic and the Dragon Track customer-facing tracker UI. Every event is a `helper.PsEvent` keyed by `(storeId, carrierId)`. The same `PsEvent.EventName` flows in both directions; direction is determined by `event.CarrierId != ""` (Algo→mobile) vs empty (mobile→Algo). | Proxy service (`bitbucket.org/dragontailcom/proxy`), which holds the WebSocket to phones (`/ws`), the Dragon Track tracker UI HTTP surface (`/setCarrierLocation`, `/deliveryRoute`, `/messageDriver`, `/drivethrough`, `/track/*`), the TrackerV2 forwarder, and the per-store / per-carrier whitelist. | **Out:** WebSocket Algo→Proxy (`/stores/ws` or `/ws`) carrying a JSON array of `PsEvent`. **In:** WebSocket Proxy→Algo on the same connection; Dragon Track UI HTTP `POST` to Proxy; per-store telematics RabbitMQ `…-v2-courier-location`. | **Out:** EventBus topic Algo→Proxy (CGW is the only writer). **In:** EventBus topic Proxy→Algo (CGW is the only reader); CGW decodes each `PsEvent` and routes to the right entity topic. | `courier.*`, `orders.delivery.status_changed` (mobile half), `orders.delivery.bid_offered` / `bid_canceled` |
+| **Proxy** (mobile devices / TrackerV2 service / in-house fleet) | Mobile-courier WebSocket traffic. Every event is a `helper.PsEvent` keyed by `(storeId, carrierId)`. The same `PsEvent.EventName` flows in both directions; direction is determined by `event.CarrierId != ""` (Algo→mobile) vs empty (mobile→Algo). | Proxy service (`bitbucket.org/dragontailcom/proxy`), which holds the WebSocket to phones (`/ws`), the `POST /setCarrierLocation` Dragon Track UI courier-location endpoint, the TrackerV2 forwarder, and the per-store / per-carrier whitelist. | **Out:** WebSocket Algo→Proxy (`/stores/ws` or `/ws`) carrying a JSON array of `PsEvent`. **In:** WebSocket Proxy→Algo on the same connection; Dragon Track UI HTTP `POST` to Proxy; per-store telematics RabbitMQ `…-v2-courier-location`. | **Out:** EventBus topic Algo→Proxy (CGW is the only writer). **In:** EventBus topic Proxy→Algo (CGW is the only reader); CGW decodes each `PsEvent` and routes to the right entity topic. | `courier.*`, `orders.delivery.status_changed` (mobile half), `orders.delivery.bid_offered` / `bid_canceled` |
 
 **Rule of thumb.** If the event names a delivery / 3PL / aggregator / marketplace order it is **DaaS**. If it names a mobile courier, a tracker UI action, or an in-house fleet device it is **Proxy**. Anything operator-facing that does not fit either of those is part of the Admin Panel UI HTTPS REST surface (§7), not an event.
 
@@ -161,7 +160,7 @@ Topics CGW **subscribes** to. Each row is detailed in §4.3 (DaaS) or §4.4 (Pro
 | DaaS | `delivery.provider.eta_requested` | `POST /api/v2/deliveries/eta` → DaaS Gateway (always Urbanpiper-backed) | `algo/AggregatorsAPI.go` → `AggRequest.SendEtaRequest` → `consts.EtaPath` |
 | DaaS | `delivery.provider.cancel_requested` | `DELETE /api/v2/deliveries` → DaaS Gateway | `algo/AggregatorsAPI.go` → `CancelDelivery` → `AggRequest.SendDelete` |
 | DaaS | `delivery.provider.rate_requested` | `POST /api/v2/deliveries/rate` → DaaS Gateway | `algo/AggregatorsAPI.go` → `SendAggCarrierRating` → `consts.CarrierRatingPath` |
-| DaaS | `delivery.provider.missed_events_requested` | `GET /api/v1/deliveries/{storeId}/{orderId}/{providerName}/{aggId}` or `GET /api/v1/marketplace/{brand}/{country}/{storeNo}/{orderId}` | `algo/AggregatorsAPI.go` → `GetMissingEvents` (timer after create / MP-ETA) |
+| DaaS | `delivery.provider.missed_events_requested` _(deprecated — not used anymore)_ | `GET /api/v1/deliveries/{storeId}/{orderId}/{providerName}/{aggId}` or `GET /api/v1/marketplace/{brand}/{country}/{storeNo}/{orderId}` | `algo/AggregatorsAPI.go` → `GetMissingEvents` (timer after create / MP-ETA) |
 | DaaS | `orders.marketplace.status_changed` | `POST /mp/{provider}/order/status` → DaaS Gateway | `algo/AggregatorsAPI.go` → `stayWithStoreCarrier` → `updateMarketPlaceWithDecision` |
 | DaaS | `orders.marketplace.switched` | `POST /mp/{provider}/order/switch` → DaaS Gateway | `algo/AggregatorsAPI.go` → `switchOrderToMPCarrier` → `updateMarketPlaceWithDecision` |
 | Proxy | `orders.delivery.status_changed` (`assigned` / `canceled`) | EventBus → Proxy as `PsEvent { EventName: Order, value: ProxyOrder }` | `algo/ProxyClient.go` → `sendEventsToProxy` (today: WS frame) |
@@ -200,12 +199,9 @@ Topics CGW **publishes** when an external peer pushes something into the cluster
 | Proxy | Mobile `Logout` `PsEvent` | `courier.status.changed` (status: `logged_out`) | Pass-through `Logout` PsEvent |
 | Proxy | Mobile `Location` `PsEvent` and Dragon Track UI `POST /setCarrierLocation` | `courier.location.updated` | `proxy/PsEvents.go` `ProcessLocationEvent`; `proxy/DragonTrack.go` `locationHandler` |
 | Proxy | Mouters telematics RabbitMQ feed | `courier.location.updated` (sourceSystem `mouters`) | RabbitMQ `…-v2-courier-location` → `algo/mouters.go` → `ProcessMouterEvent` |
-| Proxy | Mobile `Geofence` `PsEvent` | `courier.status.changed` (status: `in_store` / `out_of_store`) | `proxy/PsEvents.go` → `ProcessGeofenceEvent` |
 | Proxy | Mobile `Panic` `PsEvent` | `courier.status.changed` (status: `panic` / `panic_off`) or dedicated `courier.panic.triggered` | `proxy/PsEvents.go` → `ProcessPanicEvent` |
 | Proxy | Mobile `Order` ack (status: `delivered` / `undelivered` / `notHome` / `getItemsList` / `printInvoice`) | `orders.delivery.status_changed` | `proxy/PsEvents.go` → `ProcessOrderEvent` |
 | Proxy | Mobile `Carrier` ack (status: `inStore` / `outOfStore` / `LoggedOut` / `borrowedTo` / `borrowedFrom` / `cancelMoveRequest` / `cancelPending`) | `courier.status.changed` | `proxy/PsEvents.go` → `ProcessCarrierEvent` |
-| Proxy | Mobile `BidRequest` reply (`BidStatus`) | `orders.delivery.bid_offered` (with mobile reply) — terminal state on success | `proxy/PsEvents.go` → `ProcessBidRequestedReply` |
-| Proxy | Mobile `CancelBid` reply | `orders.delivery.bid_canceled` | `proxy/PsEvents.go` → `ProcessCancelBid` |
 | Proxy | Mobile `PushNotification` ack | `courier.message.acknowledged` | `proxy/PsEvents.go` → ack reply |
 | Proxy | Mobile `ClearNotifications` ack | `courier.message.acknowledged` | `proxy/PsEvents.go` → `ProcessClearNotificationsEvent` |
 | Proxy | Mobile `TrackOrder` reply (UI-initiated) | `courier.tracking.requested` (audit) | `proxy/PsEvents.go` → `ProcessTrackOrderEvent` |
@@ -213,11 +209,7 @@ Topics CGW **publishes** when an external peer pushes something into the cluster
 | Proxy | Mobile `AvailableOrders` request/response | `courier.available_orders.updated` (echo / audit) | `proxy/PsEvents.go` → `ProcessAvailableOrdersEvent` |
 | Proxy | Mobile `StatsByRange` / `HistoricOrderList` | `courier.stats.queried` / `courier.orders.history_queried` (audit-only sync read-through) | `proxy/PsEvents.go` |
 | Proxy | Mobile `StartUpOptions` | `courier.session.configured` (echo as ack) | `proxy/PsEvents.go` → `ProcessStartUpOptionsEvent` |
-| Proxy | Dragon Track UI `POST /deliveryRoute` | `orders.delivery.route_planned` | `proxy/DragonTrack.go` — planned to move outside Algo; if it stays, served synchronously via CGW |
-| Proxy | Dragon Track UI `POST /messageDriver` | `courier.message.posted` (sourceSystem `dragon_track_ui`) | `proxy/DragonTrack.go` — planned to move outside Algo; if it stays, served synchronously via CGW |
-| Proxy | Dragon Track UI `POST /drivethrough` | `orders.delivery.drivethrough_observed` | `proxy/DragonTrack.go`; PsEvent `eventName: driveThrough` — planned to move outside Algo; if it stays, served synchronously via CGW |
 | Proxy | Device `ApproveDevice` reply | `courier.device.approval_result` | `proxy/PsEvents.go` → `ProcessReply` |
-| Cross-cutting | Any outbound or inbound message lifecycle transition | `audit.outbound.lifecycle` | New in Algo 4 — no equivalent today |
 
 ### 4.3 DaaS family — per-event detail
 
@@ -308,6 +300,8 @@ AlgoCallback {
 **Algo 4 behaviour:** Fire-and-forget; no separate response event. Audit-only on the bus.
 
 #### 4.3.6 (Listen) `delivery.provider.missed_events_requested`
+
+> **Note:** Deprecated — this topic is no longer used. The flow is kept here for historical reference only.
 
 **Source service:** Internal recovery loop.
 **Outbound action:**
@@ -449,7 +443,7 @@ All `courier.*`, `orders.delivery.*` (mobile-driven half), and a few `store.*` t
 - Algo↔Proxy: WebSocket `wss://{Proxy.Address}/ws` or `…/stores/ws`. JSON array of `PsEvent` per text frame.
 - Proxy↔Mobile: WebSocket `/ws` per device.
 - Proxy↔TrackerV2: HTTP `POST {trackerV2Url}/{eventName}` (see §4.4.6).
-- Dragon Track UI ↔ Proxy: HTTP under `trackerListener` (`/setCarrierLocation`, `/deliveryRoute`, `/messageDriver`, `/drivethrough`, `/track/*`).
+- Dragon Track UI ↔ Proxy: HTTP `POST /setCarrierLocation` under `trackerListener` for courier-location pings. (The remaining Dragon Track UI endpoints — `/deliveryRoute`, `/messageDriver`, `/drivethrough`, `/track/*` — have moved to the Tracker Service; see §4.5.)
 
 **Direction rule** (`proxy/PsEvents.go ProcessDefaultEvent`): if incoming `event.CarrierId != ""` → Algo→Mobile; else set `event.CarrierId = c.CarrierId` and Mobile→Algo.
 
@@ -552,7 +546,7 @@ The remaining values (`arrived_to_store`, `enroute`, `delivered`, `unable_to_del
 - `PsEvent { eventName: PushNotification, value: PushNotification }` — system push: `notificationText { body, title }`, `notificationData { reloginAfter, loginAs }`. Deliver via Proxy `processPushNotifcationEvent` → HTTP `POST {PushNotifcationURL}` with device UUID.
 - `PsEvent { eventName: TrackOrder, value: helper.TrackOrder }` — tracker-driven message: `type`, `orderId`, `lastLocationId`, `fullDetails`, `lastStatus`, `message`, `requestIp`, `source`, `tester`, `campaign`, `altorderid`.
 
-**How consumed today:** `algo/ProxyClient.go InsertCarrierActivityPushAlertNotification`, `InsertCarrierActivityPushNotification`. Tracker UI's `POST /messageDriver` also lands in this topic but as a Publish (see §4.4.13).
+**How consumed today:** `algo/ProxyClient.go InsertCarrierActivityPushAlertNotification`, `InsertCarrierActivityPushNotification`. (Tracker UI's `POST /messageDriver` used to also land in this topic; that path has moved to the Tracker Service — see §4.5.)
 
 #### 4.4.8 (Listen) `courier.message.expired`
 
@@ -629,12 +623,12 @@ The remaining values (`arrived_to_store`, `enroute`, `delivered`, `unable_to_del
 | --- | --- | --- |
 | `logged_in` | Mobile `Login` accepted by Algo OR DaaS callback `DeliveryStatus.CourierLogin (7)` with `Courier.loginStatus == "online"` | `helper.Login` from device, or `AggMessage.courier.loginStatus` from DaaS |
 | `logged_out` | Mobile `Logout` PsEvent OR `Carrier { status: LoggedOut }` ack OR DaaS callback `CourierLogin` with `loginStatus == "offline"` | `Logout` PsEvent (opaque), `CarrierEventStatus { status: "LoggedOut" }`, `AggMessage.courier.loginStatus` |
-| `in_store` | Mobile `Geofence` transition `enteredStore` OR `Carrier { status: inStore }` | `Geofence` opaque (carries store ref), `CarrierEventStatus { status: "inStore" }` |
-| `out_of_store` | Mobile `Geofence` transition `exitedStore` OR `Carrier { status: outOfStore }` | `CarrierEventStatus { status: "outOfStore" }` |
+| `in_store` | Mobile `Carrier` ack `{ status: inStore }` | `CarrierEventStatus { status: "inStore" }` |
+| `out_of_store` | Mobile `Carrier` ack `{ status: outOfStore }` | `CarrierEventStatus { status: "outOfStore" }` |
 | `panic` / `panic_off` | Mobile `Panic` PsEvent with `PanicEventStatus { status, panicId }` | `structures.PanicEventStatus { status: "off" \| other, panicId }` |
 | `borrowed_to` / `borrowed_from` / `cancel_move_request` / `cancel_pending` | Mobile `Carrier` ack | `CarrierEventStatus.status ∈ { borrowedTo, borrowedFrom, cancelMoveRequest, cancelPending }` |
 
-**How consumed today:** `proxy/PsEvents.go` handlers `ProcessLoginEvent`, `ProcessGeofenceEvent`, `ProcessCarrierEvent`, `ProcessPanicEvent` forward the PsEvent to algo; algo updates carrier state in `Carriers`-related tables.
+**How consumed today:** `proxy/PsEvents.go` handlers `ProcessLoginEvent`, `ProcessCarrierEvent`, `ProcessPanicEvent` forward the PsEvent to algo; algo updates carrier state in `Carriers`-related tables.
 **Algo 4 behaviour:** Single canonical topic partitioned by `courierId`. CGW decodes the `PsEvent.eventName` and maps to the `status` enum above.
 
 #### 4.4.14 (Publish) `orders.delivery.status_changed` (mobile-driven)
@@ -658,65 +652,57 @@ The full canonical enum on the bus is `{ assigned, arrived_to_store, enroute, de
 **How consumed today:** `proxy/PsEvents.go ProcessOrderEvent` → forwarded to algo → updates order in DB.
 **Algo 4 behaviour:** Same canonical topic as §4.4.1; CGW publishes with `sourceSystem: proxy_mobile` and the canonical mapping above.
 
-#### 4.4.15 (Publish) `orders.delivery.bid_offered` (mobile reply)
-
-**External trigger:** Mobile `BidStatus` PsEvent (the `BidRequest` reply).
-**Wire shape:** `defs.Bid` with `uuid`, `legs[]`, plus the device's accept/decline indicator.
-**How consumed today:** `proxy/PsEvents.go ProcessBidRequestedReply`.
-
-#### 4.4.16 (Publish) `orders.delivery.bid_canceled` (mobile reply)
-
-**External trigger:** Mobile `CancelBid` PsEvent (`defs.EventCancelBid`).
-**Wire shape:** `defs.CancelEvent { bidUUID }`.
-**How consumed today:** `proxy/PsEvents.go ProcessCancelBid`.
-
-#### 4.4.17 (Publish) `courier.message.acknowledged`
+#### 4.4.15 (Publish) `courier.message.acknowledged`
 
 **External trigger:** Mobile reply to a `PushNotification` push, or a `ClearNotifications` ack.
 **How consumed today:** `proxy/PsEvents.go ProcessClearNotificationsEvent` and the per-event ack reply path.
 **Algo 4 behaviour:** Used by Notification Dispatcher to confirm delivery.
 
-#### 4.4.18 (Publish) `courier.tracking.requested`
+#### 4.4.16 (Publish) `courier.tracking.requested`
 
 **External trigger:** Mobile `TrackOrder` PsEvent reply (typically when a device asks the tracker UI for live drive info).
 **Wire shape:** `helper.TrackOrder { type, orderId, lastLocationId, fullDetails, lastStatus, message, requestIp, source, tester, campaign, altorderid }`.
 **How consumed today:** `proxy/PsEvents.go ProcessTrackOrderEvent`. Some flows fill an HTTP-waiter channel for the Dragon Track UI (synchronous reply to the browser).
 
-#### 4.4.19 (Publish) `courier.checklist.submitted`
+#### 4.4.17 (Publish) `courier.checklist.submitted`
 
 **External trigger:** Mobile `CheckList` PsEvent.
 **How consumed today:** `proxy/PsEvents.go ProcessChecklistEvent`.
 
-#### 4.4.20 (Publish) `courier.available_orders.updated` (mobile pull)
+#### 4.4.18 (Publish) `courier.available_orders.updated` (mobile pull)
 
 **External trigger:** Mobile `AvailableOrders` PsEvent (the device asking for the current list).
 **How consumed today:** `proxy/PsEvents.go ProcessAvailableOrdersEvent`. The corresponding push from Algo is the same canonical topic with `sourceSystem: algo` (§4.4.6).
 
-#### 4.4.21 (Publish) Dragon Track UI HTTP → bus
+#### 4.4.19 (Publish) Dragon Track UI HTTP → bus
 
-The Dragon Track tracker UI talks to Proxy over HTTP (`trackerListener` / `proxy/DragonTrack.go`), and Proxy translates each request into a `PsEvent` that the gateway forwards onto the bus.
+The Dragon Track tracker UI talks to Proxy over HTTP (`trackerListener` / `proxy/DragonTrack.go`). One route still translates into a `PsEvent` that this gateway forwards onto the bus:
 
 | HTTP route | Internal bus topic | Wire shape | Consumer today |
 | --- | --- | --- | --- |
 | `POST /setCarrierLocation` | `courier.location.updated` (sourceSystem `dragon_track_ui`) | `CarrierLocation` (§4.4.12) | algo via store WS |
-| `GET /deliveryRoute` (header `token: @customerRoute`) | `orders.delivery.route_planned` | Query → `helper.TrackOrder { type: "deliveryRoute", … }` | algo → synchronous `helper.DriveInfo` reply to the browser |
-| `POST /messageDriver` (header `token: @customerRoute`) | `courier.message.posted` (sourceSystem `dragon_track_ui`) | Form `UID`, `message` → `helper.TrackOrder { type: "messageDriver", … }` | algo → synchronous reply to browser |
-| `POST /drivethrough` | `orders.delivery.drivethrough_observed` | `helper.DriveThroughData { isArrived, uid, orderID, fields, receivedTS }` | algo via store WS |
-| `GET /track/*`, `GET /` | (UI assets, not bus) | Static / `home.html` / `homeS.html` | Tracker UI itself |
 
-`helper.DriveInfo` is the shape the algo cluster returns to `/deliveryRoute` callers (status, `OrderDetails`, `Coordinates[]`, `DriveThroughSettings`, etc.) — it's a synchronous response, not a bus event.
+The remaining Dragon Track UI routes (`/deliveryRoute`, `/messageDriver`, `/drivethrough`, plus the UI assets `/track/*` and `/`) have moved to the **Tracker Service** and are no longer in CGW's scope — see §4.5.
 
-> **Planned scope change.** `/deliveryRoute`, `/messageDriver`, and `/drivethrough` are slated to move out of Algo (Dragon Track UI talks to its own service, not to the cluster). If that move doesn't happen, the three routes stay synchronous through CGW with the wire shapes above.
-
-#### 4.4.22 (Publish) `courier.device.approval_result` and other audit-only mobile events
+#### 4.4.20 (Publish) `courier.device.approval_result` and other audit-only mobile events
 
 `StatsByRange` / `HistoricOrderList` / `Register` / `KeepAlive` / `GetUpdates` / `KdsLogin` are sync read-throughs handled inside Proxy; the gateway audits them but does not necessarily fan them out to domain services. Each gets a focused audit topic only if a real consumer exists.
 
-### 4.5 Cross-cutting — `audit.outbound.lifecycle`
+### 4.5 Moved to Tracker Service
 
-**Emitted when:** Every lifecycle transition on every outbound or inbound message (`REQUESTED → DISPATCHED → ACKED | FAILED | DEAD_LETTERED`).
-**Payload summary:** `eventId`, `correlationId`, `family ∈ { daas, proxy }`, `direction ∈ { to-daas, to-proxy, from-daas, from-proxy }`, `targetSystem`, `status`, `rawRequestRef`, `timestamps`, `errorDetails`, `retryCount`.
-**Expected consumers (inside Algo):** No internal domain consumer (cross-cutting observability only).
+The Dragon Track tracker UI HTTP surface used to be served by Proxy (`proxy/DragonTrack.go`) and reach the cluster through this gateway. The routes below have moved to the **Tracker Service**, which now owns both the tracker UI and the synchronous responses to the browser. They are **out of scope** for the Cloud Gateway.
+
+| Former route | Former internal bus topic | Wire shape | Now owned by |
+| --- | --- | --- | --- |
+| `GET /deliveryRoute` (header `token: @customerRoute`) | `orders.delivery.route_planned` | Query → `helper.TrackOrder { type: "deliveryRoute", … }`; synchronous reply was `helper.DriveInfo` (status, `OrderDetails`, `Coordinates[]`, `DriveThroughSettings`, …) | Tracker Service |
+| `POST /messageDriver` (header `token: @customerRoute`) | `courier.message.posted` (sourceSystem `dragon_track_ui`) | Form `UID`, `message` → `helper.TrackOrder { type: "messageDriver", … }`; synchronous reply to the browser | Tracker Service |
+| `POST /drivethrough` | `orders.delivery.drivethrough_observed` | `helper.DriveThroughData { isArrived, uid, orderID, fields, receivedTS }`; PsEvent `eventName: driveThrough` | Tracker Service |
+| `GET /track/*`, `GET /` | (UI assets, not bus) | Static / `home.html` / `homeS.html` | Tracker Service |
+
+Implications:
+- The bus topics `orders.delivery.route_planned` and `orders.delivery.drivethrough_observed` are no longer published by CGW.
+- `courier.message.posted` is still published by CGW but only from the algo-side push paths (§4.4.7) — the `dragon_track_ui` source path is gone.
+- Anything in Algo 4 that wants to react to tracker-UI actions now subscribes to topics published by the Tracker Service (out of scope for this document).
 
 ---
 
@@ -765,11 +751,7 @@ These cross the algo↔cloud boundary at the wire level today but belong to a di
 | `courier.location.updated` | Couriers (Vehicle) Service, AI Promise Time, Delivery Management | Three sources — `proxy_mobile`, `dragon_track_ui`, `mouters` — disambiguated by `sourceSystem`. High-volume; partition by `(storeId, carrierId)` with high partition count |
 | `courier.status.changed` | Couriers (Vehicle) Service, Delivery Management, Order Management, Employee Service | Statuses include `logged_in`, `logged_out`, `in_store`, `out_of_store`, `panic`, `borrowed_to`, `borrowed_from`, `cancel_move_request`, `cancel_pending` |
 | `orders.delivery.status_changed` | Order Management (`Order` / `Carrier` / `TrackOrder` acks), Customer Service, Delivery Management, AI Promise Time | Mobile-sourced statuses are `arrived_to_store`, `enroute`, `delivered`, `unable_to_deliver`. Algo-sourced are `assigned`, `canceled` (see §4.4.1 / §4.4.14) |
-| `orders.delivery.bid_offered` (mobile reply) | Delivery Management (`BidRequest` ack) | Algo-sourced is the offer; Mobile-sourced is the accept/decline |
-| `orders.delivery.bid_canceled` (mobile reply) | Delivery Management | |
-| `orders.delivery.route_planned` | Delivery Management | Tracker-UI-driven; `helper.TrackOrder { type: "deliveryRoute" }` |
-| `orders.delivery.drivethrough_observed` | Delivery Management | Tracker-UI-driven; `helper.DriveThroughData` |
-| `courier.message.posted` | Notification Dispatcher | Two source paths: algo-side push and tracker-UI `messageDriver` |
+| `courier.message.posted` | Notification Dispatcher | Algo-side push only (tracker-UI `messageDriver` source moved to Tracker Service — see §4.5) |
 | `courier.message.acknowledged` | Notification Dispatcher | Mobile reply to push or `ClearNotifications` ack |
 | `courier.message.expired` | Notification Dispatcher, Delivery Management | New in Algo 4 — TTL-driven |
 | `courier.session.configured` (echo) | No internal domain consumer (audit-only) | Bus-side echo when CGW pushes a fresh `MobileParameters` / `StartUpOptions` to a device |
@@ -778,13 +760,6 @@ These cross the algo↔cloud boundary at the wire level today but belong to a di
 | `courier.tracking.requested` | No internal domain consumer (audit-only) | UI-initiated `TrackOrder` |
 | `courier.checklist.submitted` | No internal domain consumer (audit-only) | |
 | `courier.device.approval_result` | No internal domain consumer (audit-only) | |
-
-### 5.3 Cross-cutting consumers
-
-| Topic | Expected consumers (inside Algo) | Notes |
-| --- | --- | --- |
-| `audit.outbound.lifecycle` | No internal domain consumer (cross-cutting observability) | Used by support tooling and operations |
-
 
 ## 6. Data Dependencies (External Reads)
 
@@ -880,10 +855,11 @@ These cross the algo↔cloud boundary at the wire level today but belong to a di
 **Returns:** Canonical events on the internal bus.
 
 ### Inbound Proxy event receiver
-**Purpose:** Receive every device-originated and tracker-UI-originated event from Proxy.
+**Purpose:** Receive every device-originated event from Proxy, plus the `POST /setCarrierLocation` Dragon Track UI courier-location pings.
 **Known consumers:** N/A — gateway-internal.
-**Inputs:** `PsEvent` envelope, `CarrierLocation` envelope, `DriveThroughData`, deliveryRoute / messageDriver payloads.
+**Inputs:** `PsEvent` envelope, `CarrierLocation` envelope.
 **Returns:** Canonical events on the internal bus.
+**Notes:** Tracker-UI HTTP routes other than `/setCarrierLocation` (`/deliveryRoute`, `/messageDriver`, `/drivethrough`) are owned by the Tracker Service — see §4.5.
 
 ### Outbound audit query API
 **Purpose:** Look up the lifecycle of any outbound message by `eventId`, `correlationId`, `(storeId, orderId)`, `(storeId, carrierId)`, or `aggOrderId`.
@@ -912,6 +888,9 @@ These cross the algo↔cloud boundary at the wire level today but belong to a di
 - **Proxy ingress/egress transport.** Same question for the Algo↔Proxy WebSocket. Three options: (a) the gateway is the only WebSocket client to Proxy and bridges to EventBus internally (no Proxy change), (b) Proxy gains EventBus ingress/egress, (c) Proxy itself becomes the cloud gateway role, absorbing this service. Recommendation: option (a) for v1, with option (b) as the target.
 - **Admin Panel UI reverse-proxying.** Should the gateway transparently reverse-proxy admin routes to underlying domain services (single hop), or should each domain service be EventBus-driven and the gateway compose answers (event-sourced)? Recommendation: reverse-proxy for v1, event-sourced for write paths in v2.
 - **Tracker-service v2 callback path.** Today the tracker-v2 flow is outbound only (`forwardeventstotrackerv2`). If the tracker service starts sending callbacks (delivery viewed, customer messaged), they will arrive over a new HTTP route — confirm that route is added to this gateway, not to Proxy.
+- **Tracker UI launched from the Algo dispatch view.** Today the operator dispatch view in Algo's frontend can open a customer-facing tracker UI for a selected order (the Dragon Track surface). The bulk of that surface (`/deliveryRoute`, `/messageDriver`, `/drivethrough`, `/track/*`) has moved to the Tracker Service — see §4.5. The one remaining route in CGW's scope is `POST /setCarrierLocation` (§4.4.12 / §4.4.19). Confirm: (a) which service owns the link / URL generation from the dispatch view in Algo 4 — Order Management, Delivery Management, the Admin Panel UI, or the Tracker Service? (b) does the operator-side dispatch view embed the cloud Tracker Service UI directly, or proxy through CGW?
+- **Mobile `BidRequest` / `CancelBid` reply events.** `proxy/PsEvents.go` exposes `ProcessBidRequestedReply` (mobile `BidStatus` reply to a `BidRequest`) and `ProcessCancelBid` (mobile reply to a `CancelBid`). It is unclear whether these are still produced by current courier apps and, if so, who consumes them on the Algo side. Removed from the inbound table (§4.2) and §4.4 detail sections pending clarification. Confirm: (a) do courier devices in production still emit `BidStatus` / `CancelBid` replies, or has the bid-accept/decline flow been replaced (e.g. by `Order` ack)? (b) if they are still emitted, which Algo service consumes the reply (Delivery Management / `algo/pool.go`)? (c) if they are still emitted, should the canonical bus topic be `orders.delivery.bid_offered` (terminal-state on accept) or a dedicated `orders.delivery.bid_replied`? Until answered, the gateway should drop these PsEvents on the floor (audit-log only).
+- **Offline / disconnected-store behavior.** Today Algo runs in-store and continues to operate when cloud connectivity is lost — orders are processed, couriers are dispatched, and mobile devices keep working through the in-store Proxy. The gateway, by contrast, is the egress chokepoint to **cloud-side** DaaS Gateway, cloud Proxy, and Admin Panel UI. Confirm: (a) when cloud connectivity drops, does the gateway buffer outbound events on the bus (and for how long) or fail-fast and rely on retry/DLQ? (b) which event families are safe to drop on the floor when offline vs. must be queued until the link is restored (e.g. `delivery.provider.create_requested` must queue, `courier.location.updated` can be dropped beyond TTL)? (c) does the gateway expose an `online/offline` health signal that in-store services can react to (e.g. to fall back to in-house fleet dispatch when DaaS Gateway is unreachable)? (d) on reconnect, is there an explicit "drain" / replay path, and how does it interact with idempotency keys and per-event TTLs?
 - **`X-Market` header propagation.** Today `algo/ProxyClient.go` `ConnectToProxyMicroService` and `proxy/eventForwarders.go` use a per-event `Market` (falling back to proxy-level `AppConf.Market`). Confirm the canonical envelope carries `market` so the gateway can fill the header on outbound calls.
 - **Multi-DaaS quote semantics.** `algo/rabbitmq.go` only registers `OnMultiDaasQuote` on the quote queue when `store.multiDaasEnabled()`. Confirm the gateway uses the same condition — single-DaaS replies synchronously on the HTTP response; multi-DaaS reads the quote off the response EventBus topic.
 - **Idempotency on provider callbacks.** Today there is no explicit idempotency key on `AggMessage`; dedup relies on Order Management's `CountAggregatorOrder` check plus the (rare) RabbitMQ at-least-once semantics. With EventBus at-least-once, we need an explicit dedup tuple. Default proposal: `(storeId, aggOrderId, deliveryStatus, courierStatus, updatedAt)`.
